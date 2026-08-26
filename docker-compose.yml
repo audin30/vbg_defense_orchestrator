@@ -7,7 +7,10 @@ services:
       POSTGRES_USER: orchestrator
       POSTGRES_PASSWORD: orchestrator
     ports:
-      - "5432:5432"
+      # Host 5433 -> container 5432: this machine already runs a native
+      # Postgres on the default 5432 (e.g. /Library/PostgreSQL), so the
+      # orchestrator's container is offset to avoid the conflict.
+      - "5433:5432"
     volumes:
       - orchestrator_pgdata:/var/lib/postgresql/data
     healthcheck:

@@ -4,7 +4,7 @@
       "command": "uvx",
       "args": ["postgres-mcp", "--access-mode=restricted"],
       "env": {
-        "DATABASE_URI": "postgresql://orchestrator:orchestrator@localhost:5432/orchestrator"
+        "DATABASE_URI": "postgresql://orchestrator:orchestrator@localhost:5433/orchestrator"
       }
     }
   }

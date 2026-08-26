@@ -49,8 +49,9 @@ For the full stack, point `DATABASE_URL` at Postgres (SQLAlchemy makes the
 engine a connection-string concern only):
 
 ```bash
-docker compose up -d   # starts postgres:16 on localhost:5432
-DATABASE_URL=postgresql+psycopg2://orchestrator:orchestrator@localhost:5432/orchestrator \
+docker compose up -d   # starts postgres:16 on localhost:5433 (offset from the
+                        # default 5432 in case a native Postgres is already there)
+DATABASE_URL=postgresql+psycopg2://orchestrator:orchestrator@localhost:5433/orchestrator \
   .venv/bin/python -m app.bootstrap
 ```
 
