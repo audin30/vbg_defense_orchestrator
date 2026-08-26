@@ -1,0 +1,125 @@
+from datetime import datetime, timedelta, timezone
+
+from app.agents import incident_commander_agent, incident_response_agent
+from app.agents.threat_intel_agent import threat_intel_agent
+from app.models import (
+    Alert,
+    AlertSeverity,
+    Asset,
+    Exposure,
+    Incident,
+    ResponseDecision,
+    ThreatActorProfile,
+    ThreatIndicator,
+    Vulnerability,
+)
+
+NOW = datetime.now(timezone.utc)
+
+
+def _asset(db, hostname, criticality=3, exposure=Exposure.INTERNAL):
+    a = Asset(hostname=hostname, ip_address="10.0.0.1", criticality=criticality, exposure=exposure)
+    db.add(a)
+    db.flush()
+    return a
+
+
+def _alert(db, asset, title, severity, technique_id, description="", minutes_ago=10):
+    a = Alert(
+        source="test",
+        title=title,
+        description=description,
+        severity=severity,
+        asset_id=asset.id,
+        attack_technique_id=technique_id,
+        occurred_at=NOW - timedelta(minutes=minutes_ago),
+    )
+    db.add(a)
+    return a
+
+
+def _incident(db, asset, alerts, severity=AlertSeverity.CRITICAL, confidence=0.9):
+    inc = Incident(title="test incident", severity=severity, asset_id=asset.id, confidence=confidence)
+    db.add(inc)
+    db.flush()
+    for a in alerts:
+        a.incident_id = inc.id
+    db.commit()
+    db.refresh(inc)
+    return inc
+
+
+def test_threat_intel_agent_matches_ioc_in_alert_text(db_session):
+    actor = ThreatActorProfile(name="TEST-ACTOR", description="", associated_technique_ids="T1041")
+    db_session.add(actor)
+    db_session.flush()
+    db_session.add(
+        ThreatIndicator(
+            indicator_type="ip", value="198.51.100.77", confidence=0.9,
+            description="test IOC", threat_actor_id=actor.id,
+        )
+    )
+    db_session.commit()
+
+    asset = _asset(db_session, "host-1")
+    alert = _alert(db_session, asset, "exfil", AlertSeverity.CRITICAL, "T1041",
+                    description="sent data to 198.51.100.77")
+    db_session.commit()
+
+    report = threat_intel_agent.get_context(db_session, [alert])
+
+    assert report.has_ioc_hit
+    assert report.ioc_matches[0].threat_actor_name == "TEST-ACTOR"
+
+
+def test_threat_intel_agent_no_match_returns_empty_report(db_session):
+    asset = _asset(db_session, "host-1")
+    alert = _alert(db_session, asset, "benign", AlertSeverity.LOW, "T1053", description="nothing interesting")
+    db_session.commit()
+
+    report = threat_intel_agent.get_context(db_session, [alert])
+
+    assert not report.has_ioc_hit
+    assert report.actor_matches == []
+
+
+def test_critical_incident_with_kev_and_ioc_gets_auto_contain(db_session):
+    web = _asset(db_session, "web-01", criticality=5, exposure=Exposure.INTERNET_FACING)
+    db_session.add(Vulnerability(cve_id="CVE-TEST-1", title="t", cvss_score=9.8, kev_listed=True, asset_id=web.id))
+    actor = ThreatActorProfile(name="TEST-ACTOR", description="", associated_technique_ids="T1190,T1041")
+    db_session.add(actor)
+    db_session.flush()
+    db_session.add(ThreatIndicator(indicator_type="ip", value="203.0.113.99", threat_actor_id=actor.id))
+    db_session.commit()
+
+    alert = _alert(db_session, web, "exploit", AlertSeverity.CRITICAL, "T1190", description="hit from 203.0.113.99")
+    incident = _incident(db_session, web, [alert], severity=AlertSeverity.CRITICAL, confidence=1.0)
+
+    triage = incident_response_agent.triage(db_session, incident)
+    decision = incident_commander_agent.decide(db_session, incident, triage)
+
+    assert triage.criticality == "critical"
+    assert decision.decision == ResponseDecision.AUTO_CONTAIN
+
+
+def test_low_confidence_incident_gets_monitor_and_no_playbooks(db_session):
+    ws = _asset(db_session, "ws-01", criticality=1, exposure=Exposure.INTERNAL)
+    alert = _alert(db_session, ws, "minor alert", AlertSeverity.LOW, "T1110")
+    incident = _incident(db_session, ws, [alert], severity=AlertSeverity.LOW, confidence=0.1)
+
+    triage = incident_response_agent.triage(db_session, incident)
+    decision = incident_commander_agent.decide(db_session, incident, triage)
+
+    assert triage.criticality == "low"
+    assert decision.decision == ResponseDecision.MONITOR
+
+
+def test_reasoning_mode_falls_back_to_deterministic_without_api_key(db_session, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    ws = _asset(db_session, "ws-01")
+    alert = _alert(db_session, ws, "alert", AlertSeverity.MEDIUM, "T1053")
+    incident = _incident(db_session, ws, [alert], severity=AlertSeverity.MEDIUM, confidence=0.4)
+
+    triage = incident_response_agent.triage(db_session, incident)
+
+    assert triage.reasoning_mode == "deterministic"

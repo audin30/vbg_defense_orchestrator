@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+orchestrator.db
+.pytest_cache/
+*.egg-info/

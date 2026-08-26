@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VBG Defense Orchestrator</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --bg-panel: #121820;
+    --bg-panel-alt: #171f2a;
+    --border: #232d3a;
+    --text: #e6edf3;
+    --text-dim: #8b98a5;
+    --text-faint: #5b6b7a;
+    --accent: #4f9dff;
+    --low: #5b7a99;
+    --medium: #d6a83a;
+    --high: #e07b39;
+    --critical: #e0475a;
+    --good: #3ecf8e;
+    --radius: 8px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    z-index: 10;
+  }
+  header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: 0.2px;
+  }
+  header h1 span { color: var(--text-faint); font-weight: 400; }
+  #status-line { font-size: 12px; color: var(--text-faint); margin-top: 2px; }
+  button {
+    background: var(--accent);
+    color: #06121f;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  button:hover { opacity: 0.9; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  main {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 20px 24px 60px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+  .stat-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+  }
+  .stat-tile {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+  }
+  .stat-tile .num { font-size: 24px; font-weight: 700; }
+  .stat-tile .label { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+  section {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  section > h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+    margin: 0;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .section-body { padding: 16px 18px; }
+  .empty { color: var(--text-faint); font-size: 13px; padding: 4px 0; }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+  .sev-low { background: rgba(91,122,153,0.18); color: var(--low); }
+  .sev-medium { background: rgba(214,168,58,0.18); color: var(--medium); }
+  .sev-high { background: rgba(224,123,57,0.18); color: var(--high); }
+  .sev-critical { background: rgba(224,71,90,0.18); color: var(--critical); }
+
+  .decision-monitor { background: rgba(91,122,153,0.18); color: var(--low); }
+  .decision-escalate { background: rgba(214,168,58,0.18); color: var(--medium); }
+  .decision-auto_contain { background: rgba(224,71,90,0.18); color: var(--critical); }
+
+  .mode-chip {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.3px;
+    color: var(--text-faint); border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 6px; font-weight: 600;
+  }
+  .mode-chip.llm { color: var(--accent); border-color: rgba(79,157,255,0.3); }
+
+  .agent-pipeline {
+    margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border);
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .agent-block { font-size: 13px; }
+  .agent-block-head {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
+  }
+  .agent-name { font-weight: 600; color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; }
+  .agent-rationale { color: var(--text); line-height: 1.5; }
+  .agent-context { color: var(--text-faint); font-size: 12px; margin-top: 4px; }
+  .agent-context b { color: var(--text-dim); font-weight: 600; }
+
+  .evidence-list { margin-top: 6px; display: flex; flex-direction: column; gap: 3px; }
+  .evidence-row { display: flex; gap: 8px; align-items: baseline; font-size: 12px; padding: 2px 0; }
+  .evidence-host { color: var(--text-dim); font-family: ui-monospace, monospace; width: 92px; flex-shrink: 0; }
+  .evidence-type { color: var(--text); }
+  .evidence-source { color: var(--text-faint); flex-shrink: 0; margin-left: auto; }
+  .evidence-ioc-tag {
+    font-size: 10px; font-weight: 700; color: var(--critical);
+    border: 1px solid rgba(224,71,90,0.35); border-radius: 4px; padding: 0 5px; flex-shrink: 0;
+  }
+
+  .chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .actor-chip, .ioc-chip {
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 12px; flex: 1 1 220px;
+  }
+  .actor-chip .name, .ioc-chip .value { font-weight: 600; font-family: ui-monospace, monospace; font-size: 12px; }
+  .actor-chip .desc, .ioc-chip .desc { color: var(--text-faint); margin-top: 3px; }
+  .actor-chip .techniques { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 4px; }
+
+  .incident-card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 12px;
+    overflow: hidden;
+  }
+  .incident-card:last-child { margin-bottom: 0; }
+  .incident-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 14px;
+    cursor: pointer;
+    background: var(--bg-panel-alt);
+  }
+  .incident-head-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .incident-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .incident-meta { font-size: 12px; color: var(--text-faint); white-space: nowrap; }
+  .confidence-bar {
+    width: 60px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; flex-shrink: 0;
+  }
+  .confidence-fill { height: 100%; background: var(--accent); }
+  .incident-body { padding: 12px 14px; display: none; }
+  .incident-body.open { display: block; }
+  .alert-row {
+    display: flex; gap: 10px; align-items: baseline; padding: 6px 0;
+    border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  .alert-row:last-child { border-bottom: none; }
+  .alert-host { color: var(--text-dim); font-family: ui-monospace, monospace; font-size: 12px; flex-shrink: 0; width: 100px; }
+  .attack-tag {
+    font-family: ui-monospace, monospace; font-size: 11px; color: var(--accent);
+    background: rgba(79,157,255,0.12); border-radius: 4px; padding: 1px 6px; flex-shrink: 0;
+  }
+  .playbook-log {
+    margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border);
+  }
+  .playbook-log-title { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
+  .action-line { font-size: 12px; color: var(--good); font-family: ui-monospace, monospace; padding: 2px 0; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--text-dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.3px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  .mono { font-family: ui-monospace, monospace; font-size: 12px; }
+  .kev-badge { background: rgba(224,71,90,0.18); color: var(--critical); border-radius: 4px; padding: 1px 6px; font-size: 10px; font-weight: 700; }
+  .dim { color: var(--text-faint); }
+
+  .coverage-grid { display: flex; flex-direction: column; gap: 8px; }
+  .coverage-row { display: flex; align-items: center; gap: 10px; }
+  .coverage-tactic { width: 160px; flex-shrink: 0; font-size: 13px; }
+  .coverage-track { flex: 1; height: 10px; background: var(--bg-panel-alt); border-radius: 5px; overflow: hidden; }
+  .coverage-fill { height: 100%; background: var(--good); }
+  .coverage-fill.gap { background: var(--high); }
+  .coverage-pct { width: 46px; text-align: right; font-size: 12px; color: var(--text-dim); flex-shrink: 0; }
+  .uncovered-list { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .uncovered-chip {
+    font-size: 11px; font-family: ui-monospace, monospace; color: var(--high);
+    background: rgba(224,123,57,0.12); border-radius: 4px; padding: 3px 8px;
+  }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>VBG Defense Orchestrator <span id="status-line">loading…</span></h1>
+  </div>
+  <button id="refresh-btn">Run Ingestion + Refresh</button>
+</header>
+
+<main>
+  <div class="stat-row" id="stat-row"></div>
+
+  <section>
+    <h2>Incidents</h2>
+    <div class="section-body" id="incidents"></div>
+  </section>
+
+  <div class="grid-2">
+    <section>
+      <h2>ATT&amp;CK Detection Coverage</h2>
+      <div class="section-body" id="coverage"></div>
+    </section>
+
+    <section>
+      <h2>Top-Risk Vulnerabilities <span class="dim" style="text-transform:none;font-weight:400;">(asset exposure/criticality-weighted)</span></h2>
+      <div class="section-body" id="vulns"></div>
+    </section>
+  </div>
+
+  <section>
+    <h2>Threat Intel Agent <span class="dim" style="text-transform:none;font-weight:400;">(tracked actor profiles &amp; indicators)</span></h2>
+    <div class="section-body" id="threat-intel"></div>
+  </section>
+
+  <section>
+    <h2>Playbook Execution Log</h2>
+    <div class="section-body" id="playbook-log"></div>
+  </section>
+</main>
+
+<script>
+const $ = (sel) => document.querySelector(sel);
+const esc = (s) => (s ?? "").toString().replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const sevBadge = (sev) => `<span class="badge sev-${sev}">${sev}</span>`;
+const fmtTime = (iso) => new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+async function fetchJSON(url, opts) {
+  const res = await fetch(url, opts);
+  if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
+  return res.json();
+}
+
+function renderStats(assets, vulns, incidents, coverage) {
+  const openIncidents = incidents.filter(i => i.status !== "closed");
+  const criticalIncidents = incidents.filter(i => i.severity === "critical");
+  const tactics = Object.values(coverage.by_tactic || {});
+  const avgCoverage = tactics.length
+    ? (tactics.reduce((sum, t) => sum + t.coverage_pct, 0) / tactics.length).toFixed(0)
+    : "—";
+
+  const tiles = [
+    { num: assets.length, label: "Assets Monitored" },
+    { num: openIncidents.length, label: "Open Incidents" },
+    { num: criticalIncidents.length, label: "Critical Incidents" },
+    { num: vulns.length, label: "Open Vulnerabilities" },
+    { num: `${avgCoverage}%`, label: "Avg ATT&CK Coverage" },
+  ];
+  $("#stat-row").innerHTML = tiles.map(t => `
+    <div class="stat-tile"><div class="num">${t.num}</div><div class="label">${t.label}</div></div>
+  `).join("");
+}
+
+function renderIncidents(incidents) {
+  const el = $("#incidents");
+  if (!incidents.length) { el.innerHTML = `<div class="empty">No incidents yet. Click "Run Ingestion + Refresh" to pull from mock sources.</div>`; return; }
+
+  el.innerHTML = incidents.map((inc, idx) => {
+    const alertRows = inc.alerts.map(a => `
+      <div class="alert-row">
+        <span class="alert-host">${esc(a.asset_hostname)}</span>
+        ${a.attack_technique_id ? `<span class="attack-tag">${esc(a.attack_technique_id)}</span>` : ""}
+        <span>${esc(a.title)}</span>
+        <span class="dim" style="margin-left:auto;flex-shrink:0;">${fmtTime(a.occurred_at)}</span>
+      </div>
+    `).join("");
+
+    const playbookBlock = inc.playbook_executions.length ? `
+      <div class="playbook-log">
+        <div class="playbook-log-title">Automated response (${inc.playbook_executions.length} playbook${inc.playbook_executions.length > 1 ? "s" : ""} fired)</div>
+        ${inc.playbook_executions.map(e => e.actions_taken.map(a => `<div class="action-line">${esc(a)}</div>`).join("")).join("")}
+      </div>
+    ` : "";
+
+    const t = inc.triage;
+    const d = inc.commander_decision;
+    const modeChip = (mode) => `<span class="mode-chip ${mode === "llm" ? "llm" : ""}">${mode === "llm" ? "LLM reasoning" : "deterministic"}</span>`;
+
+    const agentPipelineBlock = (t || d) ? `
+      <div class="agent-pipeline">
+        ${t ? `
+          <div class="agent-block">
+            <div class="agent-block-head">
+              <span class="agent-name">Incident Response Agent</span>
+              ${sevBadge(t.criticality)}
+              <span class="dim">score ${t.criticality_score}</span>
+              ${modeChip(t.reasoning_mode)}
+            </div>
+            <div class="agent-rationale">${esc(t.rationale)}</div>
+            <div class="agent-context"><b>Inventory Agent:</b> ${esc(t.asset_context_summary)}</div>
+            <div class="agent-context"><b>Vulnerability Mgmt Agent:</b> ${esc(t.vuln_context_summary)}</div>
+            <div class="agent-context"><b>Threat Intel Agent:</b> ${esc(t.threat_intel_summary)}</div>
+            ${t.evidence_items && t.evidence_items.length ? `
+              <div class="agent-context"><b>Evidence to collect &amp; preserve</b> (${t.evidence_items.length} item${t.evidence_items.length > 1 ? "s" : ""}):</div>
+              <div class="evidence-list">
+                ${t.evidence_items.map(e => `
+                  <div class="evidence-row">
+                    <span class="evidence-host">${esc(e.asset_hostname)}</span>
+                    ${e.tied_to_threat_intel ? `<span class="evidence-ioc-tag" title="${esc(e.justification)}">IOC</span>` : (e.related_technique_id ? `<span class="attack-tag">${esc(e.related_technique_id)}</span>` : "")}
+                    <span class="evidence-type">${esc(e.evidence_type)}</span>
+                    <span class="evidence-source">${esc(e.source)}</span>
+                  </div>
+                `).join("")}
+              </div>
+            ` : ""}
+          </div>
+        ` : ""}
+        ${d ? `
+          <div class="agent-block">
+            <div class="agent-block-head">
+              <span class="agent-name">Incident Commander Agent</span>
+              <span class="badge decision-${d.decision}">${d.decision.replace("_"," ")}</span>
+              ${modeChip(d.reasoning_mode)}
+            </div>
+            <div class="agent-rationale">${esc(d.summary)}</div>
+          </div>
+        ` : ""}
+      </div>
+    ` : "";
+
+    return `
+      <div class="incident-card">
+        <div class="incident-head" onclick="document.getElementById('inc-body-${idx}').classList.toggle('open')">
+          <div class="incident-head-left">
+            ${sevBadge(inc.severity)}
+            <span class="incident-title">${esc(inc.title)}</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <div class="confidence-bar"><div class="confidence-fill" style="width:${Math.round(inc.confidence*100)}%"></div></div>
+            <span class="incident-meta">${inc.alerts.length} alert${inc.alerts.length > 1 ? "s" : ""} · ${fmtTime(inc.created_at)}</span>
+          </div>
+        </div>
+        <div class="incident-body" id="inc-body-${idx}">
+          ${alertRows}
+          ${agentPipelineBlock}
+          ${playbookBlock}
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderCoverage(coverage) {
+  const el = $("#coverage");
+  const byTactic = coverage.by_tactic || {};
+  const rows = Object.entries(byTactic).map(([tactic, c]) => `
+    <div class="coverage-row">
+      <div class="coverage-tactic">${esc(tactic)}</div>
+      <div class="coverage-track"><div class="coverage-fill ${c.coverage_pct < 50 ? "gap" : ""}" style="width:${c.coverage_pct}%"></div></div>
+      <div class="coverage-pct">${c.coverage_pct}%</div>
+    </div>
+  `).join("");
+
+  const uncovered = (coverage.uncovered_techniques || []).map(t => `
+    <span class="uncovered-chip" title="${esc(t.tactic)}">${esc(t.id)} ${esc(t.name)}</span>
+  `).join("");
+
+  el.innerHTML = `
+    <div class="coverage-grid">${rows || '<div class="empty">No data.</div>'}</div>
+    ${uncovered ? `<div class="uncovered-list">${uncovered}</div>` : ""}
+  `;
+}
+
+function renderVulns(vulns) {
+  const el = $("#vulns");
+  if (!vulns.length) { el.innerHTML = `<div class="empty">No vulnerabilities ingested yet.</div>`; return; }
+
+  const anyScored = vulns.some(v => v.risk_score > 0);
+  el.innerHTML = `
+    <table>
+      <thead><tr>
+        <th>CVE</th><th>Asset</th><th>CVSS</th><th>EPSS</th><th>Risk score</th>
+      </tr></thead>
+      <tbody>
+        ${vulns.map(v => `
+          <tr>
+            <td>
+              <div class="mono">${esc(v.cve_id)} ${v.kev_listed ? '<span class="kev-badge">KEV</span>' : ""}</div>
+              <div class="dim" style="margin-top:2px;">${esc(v.title)}</div>
+            </td>
+            <td>
+              <div>${esc(v.asset.hostname)}</div>
+              <div class="dim">crit ${v.asset.criticality} · ${esc(v.asset.exposure.replace("_"," "))}</div>
+            </td>
+            <td class="mono">${v.cvss_score.toFixed(1)}</td>
+            <td class="mono">${v.epss_score.toFixed(2)}</td>
+            <td class="mono">${v.risk_score > 0 ? v.risk_score.toFixed(2) : '<span class="dim">not scored</span>'}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+    ${anyScored ? "" : `<div class="empty" style="margin-top:10px;">Risk scoring isn't implemented yet (app/services/vuln_prioritization.py::compute_risk_score) — showing raw CVSS/EPSS only.</div>`}
+  `;
+}
+
+function renderThreatIntel(profiles, indicators) {
+  const el = $("#threat-intel");
+  if (!profiles.length && !indicators.length) { el.innerHTML = `<div class="empty">No threat intel ingested yet.</div>`; return; }
+
+  const profileChips = profiles.map(p => `
+    <div class="actor-chip">
+      <div class="name">${esc(p.name)}</div>
+      <div class="desc">${esc(p.description)}</div>
+      <div class="techniques">${p.attack_technique_ids.map(t => `<span class="attack-tag">${esc(t)}</span>`).join("")}</div>
+    </div>
+  `).join("");
+
+  const iocChips = indicators.map(i => `
+    <div class="ioc-chip">
+      <div class="value">${esc(i.indicator_type)}: ${esc(i.value)}</div>
+      <div class="desc">${esc(i.description)}${i.threat_actor_name ? ` &middot; ${esc(i.threat_actor_name)}` : ""}</div>
+    </div>
+  `).join("");
+
+  el.innerHTML = `
+    <div class="playbook-log-title" style="margin-bottom:8px;">Tracked actor profiles</div>
+    <div class="chip-row">${profileChips}</div>
+    <div class="playbook-log-title" style="margin:14px 0 8px;">Indicators of compromise</div>
+    <div class="chip-row">${iocChips}</div>
+  `;
+}
+
+function renderPlaybookLog(executions, playbooks, incidents) {
+  const el = $("#playbook-log");
+  if (!executions.length) { el.innerHTML = `<div class="empty">No playbooks have fired yet.</div>`; return; }
+
+  const playbookById = Object.fromEntries(playbooks.map(p => [p.id, p]));
+  const incidentById = Object.fromEntries(incidents.map(i => [i.id, i]));
+  const sorted = [...executions].sort((a, b) => new Date(b.executed_at) - new Date(a.executed_at));
+
+  el.innerHTML = `
+    <table>
+      <thead><tr><th>Time</th><th>Playbook</th><th>Incident</th><th>Actions</th></tr></thead>
+      <tbody>
+        ${sorted.map(e => `
+          <tr>
+            <td class="dim">${fmtTime(e.executed_at)}</td>
+            <td>${esc(playbookById[e.playbook_id]?.name ?? e.playbook_id)}</td>
+            <td>${esc(incidentById[e.incident_id]?.title ?? e.incident_id)}</td>
+            <td>${e.actions_taken.map(a => `<div class="action-line">${esc(a)}</div>`).join("")}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+async function loadAll() {
+  $("#status-line").textContent = "loading…";
+  const [assets, vulns, incidents, coverage, playbooks, executions, actorProfiles, indicators] = await Promise.all([
+    fetchJSON("/assets"),
+    fetchJSON("/vulnerabilities?limit=50"),
+    fetchJSON("/incidents"),
+    fetchJSON("/attack-coverage"),
+    fetchJSON("/playbooks"),
+    fetchJSON("/playbook-executions"),
+    fetchJSON("/threat-actor-profiles"),
+    fetchJSON("/threat-indicators"),
+  ]);
+
+  renderStats(assets, vulns, incidents, coverage);
+  renderIncidents(incidents);
+  renderCoverage(coverage);
+  renderVulns(vulns);
+  renderThreatIntel(actorProfiles, indicators);
+  renderPlaybookLog(executions, playbooks, incidents);
+
+  $("#status-line").textContent = `updated ${new Date().toLocaleTimeString()}`;
+}
+
+$("#refresh-btn").addEventListener("click", async () => {
+  const btn = $("#refresh-btn");
+  btn.disabled = true;
+  btn.textContent = "Running…";
+  try {
+    await fetchJSON("/bootstrap", { method: "POST" });
+    await loadAll();
+  } catch (e) {
+    $("#status-line").textContent = `error: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Run Ingestion + Refresh";
+  }
+});
+
+loadAll().catch(e => { $("#status-line").textContent = `error: ${e.message}`; });
+</script>
+</body>
+</html>
