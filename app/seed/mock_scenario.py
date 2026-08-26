@@ -62,6 +62,18 @@ MOCK_ASSETS = [
         "business_unit": "it-infra",
         "tags": "backup,isolated",
     },
+    # Cloud estate modeled as an asset: the production AWS account. Alerts on
+    # it carry GuardDuty/CloudTrail finding_type values, which is what routes
+    # them to the AWS IRP playbook sub-agents at the Commander stage.
+    {
+        "hostname": "aws-prod-account",
+        "ip_address": "0.0.0.0",
+        "criticality": 5,
+        "exposure": "internet_facing",
+        "data_sensitivity": 5,
+        "business_unit": "platform",
+        "tags": "aws,cloud-account,production",
+    },
 ]
 
 MOCK_VULNERABILITIES = [
@@ -157,6 +169,39 @@ MOCK_ALERTS = [
         "severity": "critical",
         "attack_technique_id": "T1041",
         "occurred_at": _t(60),
+    },
+    # Second chain: cloud-native ransomware in the AWS account, modeled on the
+    # game-day scenario in the AWS IRP-Ransomware playbook (stolen instance
+    # credentials -> S3 versioning suspended + bulk deletion -> attacker KMS
+    # key re-encryption + ransom notes). Three alerts on one asset within the
+    # cluster window -> one incident, confidence 0.9 -> criticality HIGH ->
+    # Commander ESCALATE, which activates the matching AWS IRP playbooks.
+    {
+        "hostname": "aws-prod-account",
+        "title": "GuardDuty: EC2 instance credentials used from external IP",
+        "description": "Credentials for role prod-app-role exfiltrated via IMDS and used from an IP outside AWS.",
+        "severity": "high",
+        "attack_technique_id": "T1078",
+        "finding_type": "UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration.OutsideAWS",
+        "occurred_at": _t(90),
+    },
+    {
+        "hostname": "aws-prod-account",
+        "title": "S3 versioning suspended and bulk object deletion in progress",
+        "description": "PutBucketVersioning (Suspended) on 3 production buckets followed by mass DeleteObjects calls.",
+        "severity": "critical",
+        "attack_technique_id": "T1490",
+        "finding_type": "Impact:S3/AnomalousBehavior.Delete",
+        "occurred_at": _t(45),
+    },
+    {
+        "hostname": "aws-prod-account",
+        "title": "Unrecognized KMS key created; EBS volumes re-encrypted and RANSOM_NOTE.txt uploaded",
+        "description": "CreateKey from unfamiliar principal, bulk ReEncrypt on production volumes, ransom notes written to affected buckets.",
+        "severity": "critical",
+        "attack_technique_id": "T1486",
+        "finding_type": "eventName:CreateKey",
+        "occurred_at": _t(40),
     },
     # Noise
     {

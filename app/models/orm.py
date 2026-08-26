@@ -98,6 +98,10 @@ class Alert(Base):
     detection_rule_id: Mapped[str | None] = mapped_column(
         ForeignKey("detection_rules.id"), nullable=True
     )
+    # Cloud-native detection vocabulary (GuardDuty finding type or CloudTrail
+    # "eventName:..." pattern). AWS IRP playbooks trigger on these, not on
+    # ATT&CK technique IDs. Null for on-prem/host alerts.
+    finding_type: Mapped[str | None] = mapped_column(String, nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     incident_id: Mapped[str | None] = mapped_column(ForeignKey("incidents.id"), nullable=True)
 
@@ -283,6 +287,9 @@ class ResponseTask(Base):
     action: Mapped[str] = mapped_column(Text)
     scope_hostname: Mapped[str | None] = mapped_column(String, nullable=True)  # None = incident-wide
     triggered_by_technique_ids: Mapped[str] = mapped_column(String, default="")  # comma-separated
+    # "ir_agent" = spawned at triage time; "commander" = AWS IRP playbooks
+    # activated by the Commander's ESCALATE/AUTO_CONTAIN call.
+    dispatched_by: Mapped[str] = mapped_column(String, default="ir_agent")
     status: Mapped[ResponseTaskStatus] = mapped_column(
         Enum(ResponseTaskStatus), default=ResponseTaskStatus.RECOMMENDED
     )

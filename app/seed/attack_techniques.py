@@ -30,4 +30,5 @@ ATTACK_TECHNIQUES = [
     ("T1041", "Exfiltration Over C2 Channel", "Exfiltration"),
     ("T1486", "Data Encrypted for Impact", "Impact"),
     ("T1489", "Service Stop", "Impact"),
+    ("T1490", "Inhibit System Recovery", "Impact"),
 ]

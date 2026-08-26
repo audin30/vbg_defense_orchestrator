@@ -310,6 +310,28 @@ function renderIncidents(incidents) {
   const el = $("#incidents");
   if (!incidents.length) { el.innerHTML = `<div class="empty">No incidents yet. Click "Run Ingestion + Refresh" to pull from mock sources.</div>`; return; }
 
+  const runbookGroupsHtml = (tasks, heading) => {
+    if (!tasks || !tasks.length) return "";
+    const byRunbook = {};
+    tasks.forEach(rt => { (byRunbook[rt.runbook_name] = byRunbook[rt.runbook_name] || []).push(rt); });
+    const n = Object.keys(byRunbook).length;
+    return `
+      <div class="agent-context"><b>${heading}</b> (${n} runbook${n > 1 ? "s" : ""}):</div>
+      ${Object.entries(byRunbook).map(([name, ts]) => `
+        <div class="runbook-group">
+          <div class="runbook-group-title">${esc(name)}${ts[0].triggered_by_technique_ids.length ? ` <span class="dim">· triggered by ${ts[0].triggered_by_technique_ids.map(esc).join(", ")}</span>` : ""}</div>
+          ${ts.map(rt => `
+            <div class="evidence-row">
+              <span class="phase-tag phase-${esc(rt.phase)}">${esc(rt.phase)}</span>
+              <span class="evidence-type">${esc(rt.action)}</span>
+              <span class="evidence-source">${rt.scope_hostname ? esc(rt.scope_hostname) : "incident-wide"}</span>
+            </div>
+          `).join("")}
+        </div>
+      `).join("")}
+    `;
+  };
+
   el.innerHTML = incidents.map((inc, idx) => {
     const alertRows = inc.alerts.map(a => `
       <div class="alert-row">
@@ -358,25 +380,7 @@ function renderIncidents(incidents) {
                 `).join("")}
               </div>
             ` : ""}
-            ${t.response_tasks && t.response_tasks.length ? (() => {
-              const byRunbook = {};
-              t.response_tasks.forEach(rt => { (byRunbook[rt.runbook_name] = byRunbook[rt.runbook_name] || []).push(rt); });
-              return `
-                <div class="agent-context"><b>Response runbooks spawned</b> (${Object.keys(byRunbook).length} sub-agent${Object.keys(byRunbook).length > 1 ? "s" : ""}):</div>
-                ${Object.entries(byRunbook).map(([name, tasks]) => `
-                  <div class="runbook-group">
-                    <div class="runbook-group-title">${esc(name)}${tasks[0].triggered_by_technique_ids.length ? ` <span class="dim">· triggered by ${tasks[0].triggered_by_technique_ids.map(esc).join(", ")}</span>` : ""}</div>
-                    ${tasks.map(rt => `
-                      <div class="evidence-row">
-                        <span class="phase-tag phase-${esc(rt.phase)}">${esc(rt.phase)}</span>
-                        <span class="evidence-type">${esc(rt.action)}</span>
-                        <span class="evidence-source">${rt.scope_hostname ? esc(rt.scope_hostname) : "incident-wide"}</span>
-                      </div>
-                    `).join("")}
-                  </div>
-                `).join("")}
-              `;
-            })() : ""}
+            ${runbookGroupsHtml(t.response_tasks, "Response runbooks spawned")}
           </div>
         ` : ""}
         ${d ? `
@@ -387,6 +391,7 @@ function renderIncidents(incidents) {
               ${modeChip(d.reasoning_mode)}
             </div>
             <div class="agent-rationale">${esc(d.summary)}</div>
+            ${runbookGroupsHtml(d.response_tasks, "AWS IRP playbooks activated by this decision")}
           </div>
         ` : ""}
       </div>

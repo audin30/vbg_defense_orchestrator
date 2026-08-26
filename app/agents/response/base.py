@@ -33,6 +33,17 @@ class ResponseSubAgent:
     trigger_technique_ids: frozenset[str]
     runbook: list[tuple[str, str, bool]]
 
+    def _alert_matches(self, alert) -> bool:
+        """Does one alert carry this sub-agent's trigger signal? Default is
+        ATT&CK technique membership; the AWS playbook sub-agents override
+        this to match on GuardDuty/CloudTrail finding_type instead."""
+        return alert.attack_technique_id in self.trigger_technique_ids
+
+    def _matched_signals(self, incident: Incident, observed_technique_ids: set[str]) -> list[str]:
+        """The trigger values that fired, recorded on the plan for
+        traceability (technique IDs here; finding types for AWS agents)."""
+        return sorted(observed_technique_ids & self.trigger_technique_ids)
+
     def matches(self, incident: Incident, observed_technique_ids: set[str]) -> bool:
         """Should this sub-agent be spawned for the incident? The default is
         a simple trigger-set intersection; subclasses may override for
@@ -41,13 +52,9 @@ class ResponseSubAgent:
         return bool(observed_technique_ids & self.trigger_technique_ids)
 
     def respond(self, incident: Incident, observed_technique_ids: set[str]) -> ResponsePlan:
-        triggered = sorted(observed_technique_ids & self.trigger_technique_ids)
+        triggered = self._matched_signals(incident, observed_technique_ids)
         affected_hostnames = sorted(
-            {
-                alert.asset.hostname
-                for alert in incident.alerts
-                if alert.attack_technique_id in self.trigger_technique_ids
-            }
+            {alert.asset.hostname for alert in incident.alerts if self._alert_matches(alert)}
         )
         # A behavioral match (custom matches() override) can fire without any
         # single trigger technique present; fall back to all incident assets.

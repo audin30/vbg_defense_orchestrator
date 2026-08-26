@@ -94,6 +94,7 @@ def ingest_alerts(db: Session) -> list[Alert]:
             severity=AlertSeverity(raw["severity"]),
             asset_id=asset.id,
             attack_technique_id=raw.get("attack_technique_id"),
+            finding_type=raw.get("finding_type"),
             occurred_at=occurred_at,
         )
         db.add(alert)

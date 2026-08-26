@@ -89,6 +89,7 @@ def _response_task_dict(t: ResponseTask) -> dict:
         "action": t.action,
         "scope_hostname": t.scope_hostname,
         "triggered_by_technique_ids": [x for x in t.triggered_by_technique_ids.split(",") if x],
+        "dispatched_by": t.dispatched_by,
         "status": t.status.value,
     }
 
@@ -99,7 +100,7 @@ def _triage_dict(t: IncidentTriage | None, db: Session) -> dict | None:
     evidence_items = db.query(EvidenceItem).filter_by(incident_id=t.incident_id).all()
     response_tasks = (
         db.query(ResponseTask)
-        .filter_by(incident_id=t.incident_id)
+        .filter_by(incident_id=t.incident_id, dispatched_by="ir_agent")
         .order_by(ResponseTask.category, ResponseTask.step_order)
         .all()
     )
@@ -119,13 +120,20 @@ def _triage_dict(t: IncidentTriage | None, db: Session) -> dict | None:
     }
 
 
-def _commander_decision_dict(d: CommanderDecision | None) -> dict | None:
+def _commander_decision_dict(d: CommanderDecision | None, db: Session) -> dict | None:
     if d is None:
         return None
+    aws_tasks = (
+        db.query(ResponseTask)
+        .filter_by(incident_id=d.incident_id, dispatched_by="commander")
+        .order_by(ResponseTask.category, ResponseTask.step_order)
+        .all()
+    )
     return {
         "decision": d.decision.value,
         "summary": d.summary,
         "reasoning_mode": d.reasoning_mode.value,
+        "response_tasks": [_response_task_dict(t) for t in aws_tasks],
         "created_at": d.created_at.isoformat(),
     }
 
@@ -152,7 +160,7 @@ def _incident_dict(i: Incident, db: Session) -> dict:
             for e in i.playbook_executions
         ],
         "triage": _triage_dict(triage, db),
-        "commander_decision": _commander_decision_dict(decision),
+        "commander_decision": _commander_decision_dict(decision, db),
     }
 
 

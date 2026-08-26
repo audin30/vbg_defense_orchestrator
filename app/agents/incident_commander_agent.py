@@ -14,7 +14,8 @@ from sqlalchemy.orm import Session
 
 from app.agents import llm_reasoning
 from app.agents.context import TriageReport
-from app.models import CommanderDecision, Incident, ReasoningMode, ResponseDecision
+from app.agents.response.aws import dispatch_aws_playbooks
+from app.models import CommanderDecision, Incident, ReasoningMode, ResponseDecision, ResponseTask
 from app.services import soar_engine
 
 _DECISION_BY_CRITICALITY = {
@@ -37,7 +38,18 @@ def _deterministic_summary(incident: Incident, triage: TriageReport, decision: R
 class IncidentCommanderAgent:
     def decide(self, db: Session, incident: Incident, triage: TriageReport) -> CommanderDecision:
         decision = _DECISION_BY_CRITICALITY[triage.criticality]
+
+        # The Commander's call is what activates AWS IRP playbooks: only an
+        # ESCALATE/AUTO_CONTAIN decision routes the incident into the cloud
+        # playbook sub-agents (finding-type-triggered, see agents/response/aws).
+        aws_plans = dispatch_aws_playbooks(incident, decision)
+
         deterministic_text = _deterministic_summary(incident, triage, decision)
+        if aws_plans:
+            deterministic_text += (
+                " AWS IRP playbooks activated: "
+                + "; ".join(p.runbook_name for p in aws_plans) + "."
+            )
 
         summary, mode = llm_reasoning.reason(
             system_prompt=(
@@ -50,6 +62,8 @@ class IncidentCommanderAgent:
                 f"Incident: {incident.title}\n"
                 f"Triage rationale: {triage.rationale}\n"
                 f"Response decision: {decision.value}\n"
+                f"AWS IRP playbooks activated by this decision: "
+                f"{'; '.join(p.runbook_name for p in aws_plans) or 'none'}\n"
             ),
             fallback_text=deterministic_text,
             model=llm_reasoning.COMMANDER_MODEL,
@@ -62,6 +76,21 @@ class IncidentCommanderAgent:
             reasoning_mode=ReasoningMode(mode),
         )
         db.add(commander_decision)
+        for plan in aws_plans:
+            for step in plan.steps:
+                db.add(
+                    ResponseTask(
+                        incident_id=incident.id,
+                        category=plan.category,
+                        runbook_name=plan.runbook_name,
+                        phase=step.phase,
+                        step_order=step.order,
+                        action=step.action,
+                        scope_hostname=step.scope_hostname,
+                        triggered_by_technique_ids=",".join(plan.triggered_by_technique_ids),
+                        dispatched_by="commander",
+                    )
+                )
         db.commit()
 
         if decision == ResponseDecision.AUTO_CONTAIN:

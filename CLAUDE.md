@@ -141,6 +141,42 @@ To add a category: subclass `ResponseSubAgent` in a new
 `app/agents/response/<category>.py` and append its instance to
 `RESPONSE_SUBAGENTS` in `response/__init__.py`.
 
+### AWS IRP playbook sub-agents (Commander-stage dispatch)
+
+`app/agents/response/aws/` holds a second tier of sub-agents distilled from
+the AWS incident response playbook checkout at
+`playbooks/aws-incident-response-playbooks/` (gitignored reference clone;
+each subclass's `source_playbook` cites its markdown source). One sub-agent
+per playbook present in the checkout — credential compromise, STS token
+abuse, ransomware, data access, personal data breach, DoS, insider threat,
+Identity Center compromise, federated access abuse, satellite operations —
+all defined in `aws/catalog.py` (add new ones there, not in separate files).
+
+They differ from the generic category sub-agents in two ways:
+
+1. **Trigger vocabulary** — matched by prefix against `Alert.finding_type`
+   (GuardDuty finding types / CloudTrail `eventName:...` values), not
+   ATT&CK technique IDs. On-prem alerts have `finding_type = None` and can
+   never spawn them.
+2. **Dispatch stage** — activated by the **Commander's decision**, not at
+   triage: `incident_commander_agent.decide()` calls
+   `dispatch_aws_playbooks(incident, decision)` and only
+   ESCALATE/AUTO_CONTAIN activate playbooks (MONITOR never does),
+   mirroring the AWS triage guide where P1/P2 routes into a full playbook.
+
+Both tiers persist `ResponseTask` rows; `dispatched_by` ("ir_agent" vs
+"commander") is what separates them — the API surfaces triage-stage tasks
+under `triage.response_tasks` and Commander-stage tasks under
+`commander_decision.response_tasks`. For AWS-tier tasks the
+`triggered_by_technique_ids` column holds the matched *finding types*
+(the column name is historical).
+
+The mock scenario includes a second, cloud-native attack chain on the
+`aws-prod-account` asset (stolen instance credentials → S3 versioning
+suspension + bulk deletion → attacker KMS key + ransom notes) tuned to land
+at criticality HIGH → ESCALATE, which activates the AWS Ransomware and STS
+Token Abuse playbooks in the demo.
+
 ### Evidence collection & preservation
 
 `app/agents/evidence_planner.py::build_evidence_plan()` is called by the IR
