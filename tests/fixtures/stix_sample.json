@@ -1,0 +1,60 @@
+{
+  "type": "bundle",
+  "id": "bundle--test",
+  "objects": [
+    {
+      "type": "attack-pattern",
+      "id": "attack-pattern--aaa",
+      "name": "Command and Scripting Interpreter",
+      "kill_chain_phases": [{"kill_chain_name": "mitre-attack", "phase_name": "execution"}],
+      "external_references": [{"source_name": "mitre-attack", "external_id": "T1059"}]
+    },
+    {
+      "type": "attack-pattern",
+      "id": "attack-pattern--bbb",
+      "name": "LSASS Memory",
+      "kill_chain_phases": [{"kill_chain_name": "mitre-attack", "phase_name": "credential-access"}],
+      "external_references": [{"source_name": "mitre-attack", "external_id": "T1003.001"}]
+    },
+    {
+      "type": "attack-pattern",
+      "id": "attack-pattern--ccc",
+      "name": "Remote Services",
+      "kill_chain_phases": [{"kill_chain_name": "mitre-attack", "phase_name": "lateral-movement"}],
+      "external_references": [{"source_name": "mitre-attack", "external_id": "T1021"}]
+    },
+    {
+      "type": "attack-pattern",
+      "id": "attack-pattern--ddd",
+      "name": "Deprecated Technique",
+      "x_mitre_deprecated": true,
+      "kill_chain_phases": [{"kill_chain_name": "mitre-attack", "phase_name": "impact"}],
+      "external_references": [{"source_name": "mitre-attack", "external_id": "T9998"}]
+    },
+    {
+      "type": "intrusion-set",
+      "id": "intrusion-set--g1",
+      "name": "TEST-GROUP-ALPHA",
+      "description": "First line of description.\nSecond line should be trimmed."
+    },
+    {
+      "type": "intrusion-set",
+      "id": "intrusion-set--g2",
+      "name": "TEST-GROUP-SPARSE",
+      "description": "Only one mapped technique; filtered as noise."
+    },
+    {
+      "type": "intrusion-set",
+      "id": "intrusion-set--g3",
+      "name": "TEST-GROUP-REVOKED",
+      "revoked": true,
+      "description": "Revoked group must be skipped."
+    },
+    {"type": "relationship", "id": "relationship--1", "relationship_type": "uses", "source_ref": "intrusion-set--g1", "target_ref": "attack-pattern--aaa"},
+    {"type": "relationship", "id": "relationship--2", "relationship_type": "uses", "source_ref": "intrusion-set--g1", "target_ref": "attack-pattern--bbb"},
+    {"type": "relationship", "id": "relationship--3", "relationship_type": "uses", "source_ref": "intrusion-set--g1", "target_ref": "attack-pattern--ccc"},
+    {"type": "relationship", "id": "relationship--4", "relationship_type": "uses", "source_ref": "intrusion-set--g2", "target_ref": "attack-pattern--aaa"},
+    {"type": "relationship", "id": "relationship--5", "relationship_type": "uses", "source_ref": "intrusion-set--g3", "target_ref": "attack-pattern--aaa"},
+    {"type": "relationship", "id": "relationship--6", "relationship_type": "mitigates", "source_ref": "intrusion-set--g1", "target_ref": "attack-pattern--aaa"}
+  ]
+}

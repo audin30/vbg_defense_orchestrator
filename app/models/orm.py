@@ -212,6 +212,24 @@ class ThreatIndicator(Base):
     threat_actor: Mapped["ThreatActorProfile | None"] = relationship()
 
 
+class KevEntry(Base):
+    """One CISA Known Exploited Vulnerabilities catalog entry, ingested from
+    the KEV connector. `Vulnerability.kev_listed` is derived from this table
+    when the catalog is populated -- the catalog, not the scanner, is the
+    source of truth for exploitation-in-the-wild."""
+
+    __tablename__ = "kev_entries"
+
+    cve_id: Mapped[str] = mapped_column(String, primary_key=True)
+    vendor_project: Mapped[str] = mapped_column(String, default="")
+    product: Mapped[str] = mapped_column(String, default="")
+    vulnerability_name: Mapped[str] = mapped_column(String, default="")
+    date_added: Mapped[str] = mapped_column(String, default="")  # ISO date from the feed
+    due_date: Mapped[str] = mapped_column(String, default="")  # CISA remediation due date
+    known_ransomware_use: Mapped[bool] = mapped_column(Boolean, default=False)
+    short_description: Mapped[str] = mapped_column(Text, default="")
+
+
 class ReasoningMode(str, enum.Enum):
     DETERMINISTIC = "deterministic"
     LLM = "llm"

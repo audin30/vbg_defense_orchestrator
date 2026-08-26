@@ -11,6 +11,7 @@ from app.models import (
     EvidenceItem,
     Incident,
     IncidentTriage,
+    KevEntry,
     Playbook,
     PlaybookExecution,
     ResponseTask,
@@ -37,7 +38,7 @@ def _asset_dict(a: Asset) -> dict:
     }
 
 
-def _vuln_dict(v: Vulnerability) -> dict:
+def _vuln_dict(v: Vulnerability, kev: KevEntry | None = None) -> dict:
     return {
         "id": v.id,
         "cve_id": v.cve_id,
@@ -45,6 +46,8 @@ def _vuln_dict(v: Vulnerability) -> dict:
         "cvss_score": v.cvss_score,
         "epss_score": v.epss_score,
         "kev_listed": v.kev_listed,
+        "kev_due_date": kev.due_date if kev else None,
+        "kev_ransomware_use": kev.known_ransomware_use if kev else False,
         "status": v.status.value,
         "risk_score": v.risk_score,
         "asset": _asset_dict(v.asset),
@@ -178,7 +181,34 @@ def list_assets(db: Session = Depends(get_db)):
 
 @router.get("/vulnerabilities")
 def list_vulnerabilities(limit: int = 20, db: Session = Depends(get_db)):
-    return [_vuln_dict(v) for v in ranked_vulnerabilities(db, limit=limit)]
+    vulns = ranked_vulnerabilities(db, limit=limit)
+    kev_by_cve = {
+        e.cve_id: e
+        for e in db.query(KevEntry).filter(KevEntry.cve_id.in_([v.cve_id for v in vulns])).all()
+    }
+    return [_vuln_dict(v, kev_by_cve.get(v.cve_id)) for v in vulns]
+
+
+@router.get("/kev-catalog")
+def kev_catalog(limit: int = 50, db: Session = Depends(get_db)):
+    total = db.query(KevEntry).count()
+    entries = db.query(KevEntry).order_by(KevEntry.date_added.desc()).limit(limit).all()
+    return {
+        "total": total,
+        "entries": [
+            {
+                "cve_id": e.cve_id,
+                "vendor_project": e.vendor_project,
+                "product": e.product,
+                "vulnerability_name": e.vulnerability_name,
+                "date_added": e.date_added,
+                "due_date": e.due_date,
+                "known_ransomware_use": e.known_ransomware_use,
+                "short_description": e.short_description,
+            }
+            for e in entries
+        ],
+    }
 
 
 @router.get("/alerts")
@@ -238,16 +268,21 @@ def list_playbooks(db: Session = Depends(get_db)):
 
 
 @router.get("/threat-actor-profiles")
-def list_threat_actor_profiles(db: Session = Depends(get_db)):
-    return [
-        {
-            "id": p.id,
-            "name": p.name,
-            "description": p.description,
-            "attack_technique_ids": p.associated_technique_ids.split(","),
-        }
-        for p in db.query(ThreatActorProfile).all()
-    ]
+def list_threat_actor_profiles(limit: int = 50, db: Session = Depends(get_db)):
+    total = db.query(ThreatActorProfile).count()
+    profiles = db.query(ThreatActorProfile).order_by(ThreatActorProfile.name).limit(limit).all()
+    return {
+        "total": total,
+        "profiles": [
+            {
+                "id": p.id,
+                "name": p.name,
+                "description": p.description,
+                "attack_technique_ids": p.associated_technique_ids.split(","),
+            }
+            for p in profiles
+        ],
+    }
 
 
 @router.get("/threat-indicators")

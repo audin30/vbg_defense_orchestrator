@@ -100,7 +100,10 @@ def _vuln_summary(vuln_mgmt) -> str:
     if not vuln_mgmt.findings:
         return "No open vulnerabilities on affected assets."
     return "; ".join(
-        f"{f.cve_id} on {f.hostname} (CVSS {f.cvss_score}{' , KEV' if f.kev_listed else ''})"
+        f"{f.cve_id} on {f.hostname} (CVSS {f.cvss_score}"
+        f"{', KEV' if f.kev_listed else ''}"
+        f"{', ransomware-associated' if f.kev_ransomware_use else ''}"
+        f"{f', remediation due {f.kev_due_date}' if f.kev_due_date else ''})"
         for f in vuln_mgmt.findings
     )
 

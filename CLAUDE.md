@@ -10,9 +10,11 @@ five-agent SOAR triage/response pipeline. Backend is FastAPI + SQLAlchemy
 (SQLite), frontend is a single static HTML/vanilla-JS dashboard with no
 build step, served by FastAPI itself.
 
-All external data sources (SIEM, vuln scanner, asset inventory, threat
-intel) are currently **mocked** with a deliberately coherent synthetic
-attack scenario — see "The mock scenario" below.
+SIEM, vuln scanner, asset inventory, and IOC/TIP feeds are currently
+**mocked** with a deliberately coherent synthetic attack scenario — see
+"The mock scenario" below. Two intel sources are **live**: the CISA KEV
+catalog and the MITRE ATT&CK Enterprise dataset (see "Live threat intel"
+below); both degrade gracefully offline.
 
 ## Commands
 
@@ -37,9 +39,26 @@ python3 -m venv .venv
 
 There is no linter/formatter configured in this repo yet.
 
-The SQLite DB file is `orchestrator.db` at the repo root, created on first
-`run_bootstrap()` call. Delete it to reset all state; nothing in the app
-depends on it persisting across runs.
+### Database
+
+SQLite by default: the DB file is `orchestrator.db` at the repo root,
+created on first `run_bootstrap()` call. Delete it to reset all state;
+nothing in the app depends on it persisting across runs.
+
+For the full stack, point `DATABASE_URL` at Postgres (SQLAlchemy makes the
+engine a connection-string concern only):
+
+```bash
+docker compose up -d   # starts postgres:16 on localhost:5432
+DATABASE_URL=postgresql+psycopg2://orchestrator:orchestrator@localhost:5432/orchestrator \
+  .venv/bin/python -m app.bootstrap
+```
+
+`.mcp.json` configures a read-only postgres MCP server
+(`uvx postgres-mcp --access-mode=restricted`) against the same database, so
+Claude Code can query the intel warehouse (KEV entries, actor profiles,
+incidents) directly during dev/IR sessions. Tests always use in-memory
+SQLite regardless of `DATABASE_URL`.
 
 ## Architecture
 
@@ -56,6 +75,37 @@ decides which concrete connector backs each interface (`siem_connector`,
 CrowdStrike, a TIP), implement the matching base class in a new
 `app/connectors/<product>.py` and change the import in `__init__.py` —
 nothing else in the app changes.
+
+### Live threat intel (CISA KEV + MITRE ATT&CK)
+
+Two connectors are live rather than mocked, both built on
+`app/connectors/_http_cache.py::fetch_json_cached` (serve fresh cache →
+refetch when stale → stale cache on failure → `None`; cache files live in
+the gitignored `data/` dir):
+
+- **CISA KEV** (`app/connectors/cisa_kev.py`, 24h cache) → upserted into the
+  `KevEntry` table by `ingestion_service.ingest_kev_catalog`. After vuln
+  ingestion, `apply_kev_enrichment` recomputes `Vulnerability.kev_listed`
+  from the catalog (the catalog, not the scanner, is the source of truth —
+  skipped when the catalog is empty, e.g. fully offline). The Vulnerability
+  Management Agent surfaces `kev_due_date`/`kev_ransomware_use` per finding;
+  `knownRansomwareCampaignUse` is a ready signal for the ransomware
+  precursor heuristic.
+- **MITRE ATT&CK** (`app/connectors/mitre_attack.py`, 7-day cache) parses
+  the official Enterprise STIX bundle: ~700 techniques (sub-techniques
+  included, deprecated/revoked skipped, first kill-chain phase = tactic)
+  feed `seed_attack_techniques` (curated seed remains the offline
+  fallback), and ~160 intrusion sets with ≥3 "uses" relationships feed
+  `ThreatActorProfile` rows alongside the mock TIP profiles.
+
+**Actor matching is incident-coverage, not Jaccard**
+(`threat_intel_agent.py`): real groups know hundreds of techniques, which
+makes Jaccard vanish for small incidents. A match needs the actor to cover
+≥50% of the incident's techniques with ≥2 in common; top 3 reported.
+
+VirusTotal is a defined seam only: `IocEnrichmentConnector` in
+`connectors/base.py`, `NullIocEnrichmentConnector` wired by default,
+`IocMatch.enrichment` carries the result once a real provider is added.
 
 ### Data pipeline
 
@@ -173,9 +223,10 @@ under `triage.response_tasks` and Commander-stage tasks under
 
 The mock scenario includes a second, cloud-native attack chain on the
 `aws-prod-account` asset (stolen instance credentials → S3 versioning
-suspension + bulk deletion → attacker KMS key + ransom notes) tuned to land
-at criticality HIGH → ESCALATE, which activates the AWS Ransomware and STS
-Token Abuse playbooks in the demo.
+suspension + bulk deletion → attacker KMS key + ransom notes). With live
+threat intel it lands CRITICAL → AUTO_CONTAIN (real ransomware groups fully
+cover its technique set); offline it lands HIGH → ESCALATE. Either way it
+activates the AWS Ransomware and STS Token Abuse playbooks in the demo.
 
 ### Evidence collection & preservation
 

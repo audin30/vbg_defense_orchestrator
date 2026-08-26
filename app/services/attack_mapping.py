@@ -3,16 +3,28 @@ from collections import defaultdict
 
 from sqlalchemy.orm import Session
 
+from app.connectors import attack_catalog_connector
 from app.models import AttackTechnique, DetectionRule
 from app.seed.attack_techniques import ATTACK_TECHNIQUES
 
 
 def seed_attack_techniques(db: Session) -> int:
+    """Populate the technique registry from the ATT&CK catalog connector
+    (the full Enterprise dataset when live/cached). Falls back to the
+    curated seed when the connector has nothing, so offline bootstrap and
+    tests keep working. Upsert by technique id."""
+    techniques = attack_catalog_connector.fetch_techniques()
+    if not techniques:
+        techniques = [{"id": tid, "name": name, "tactic": tactic} for tid, name, tactic in ATTACK_TECHNIQUES]
+
     created = 0
-    for tid, name, tactic in ATTACK_TECHNIQUES:
-        if db.get(AttackTechnique, tid) is not None:
+    for raw in techniques:
+        existing = db.get(AttackTechnique, raw["id"])
+        if existing is not None:
+            existing.name = raw["name"]
+            existing.tactic = raw["tactic"]
             continue
-        db.add(AttackTechnique(id=tid, name=name, tactic=tactic))
+        db.add(AttackTechnique(id=raw["id"], name=raw["name"], tactic=raw["tactic"]))
         created += 1
     db.commit()
     return created

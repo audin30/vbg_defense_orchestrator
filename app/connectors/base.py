@@ -56,3 +56,54 @@ class ThreatIntelConnector(ABC):
         """Return raw threat-actor/cluster dicts. Fields: name, description,
         attack_technique_ids (list of str)."""
         raise NotImplementedError
+
+
+class KevCatalogConnector(ABC):
+    """Source of the CISA Known Exploited Vulnerabilities catalog (the live
+    CISA feed, or a mock)."""
+
+    @abstractmethod
+    def fetch_kev_entries(self) -> list[dict[str, Any]]:
+        """Return raw KEV entry dicts. Fields: cve_id, vendor_project,
+        product, vulnerability_name, date_added, due_date,
+        known_ransomware_use (bool), short_description."""
+        raise NotImplementedError
+
+
+class AttackCatalogConnector(ABC):
+    """Source of the MITRE ATT&CK Enterprise catalog (the official STIX
+    bundle, or a mock backed by the curated seed)."""
+
+    @abstractmethod
+    def fetch_techniques(self) -> list[dict[str, Any]]:
+        """Return raw technique dicts. Fields: id (e.g. "T1059" or
+        "T1003.001"), name, tactic."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def fetch_actor_groups(self) -> list[dict[str, Any]]:
+        """Return raw actor-group dicts. Fields: name, description,
+        attack_technique_ids (list of str). Same shape as
+        ThreatIntelConnector.fetch_actor_profiles so both can feed
+        ThreatActorProfile rows."""
+        raise NotImplementedError
+
+
+class IocEnrichmentConnector(ABC):
+    """On-demand enrichment for a single IOC (e.g. VirusTotal). Unlike the
+    bulk connectors above this is called per-indicator at analysis time, not
+    at ingestion -- lookup APIs are rate-limited and keyed."""
+
+    @abstractmethod
+    def enrich(self, indicator_type: str, value: str) -> dict[str, Any] | None:
+        """Return an enrichment dict (source-specific: verdict counts,
+        reputation, reference link) or None when unavailable."""
+        raise NotImplementedError
+
+
+class NullIocEnrichmentConnector(IocEnrichmentConnector):
+    """Default no-op enrichment -- wired until a real provider (VirusTotal)
+    is configured with an API key."""
+
+    def enrich(self, indicator_type: str, value: str) -> dict[str, Any] | None:
+        return None

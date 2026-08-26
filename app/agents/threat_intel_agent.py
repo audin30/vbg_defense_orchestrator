@@ -3,17 +3,27 @@
 Two independent signals, either of which is meaningful on its own:
 1. Direct IOC hit -- an indicator value (IP/domain/hash) literally appears in
    an alert's text. High confidence, low recall (only catches known infra).
-2. TTP overlap -- the set of ATT&CK techniques seen in the incident overlaps
-   a tracked actor profile's known technique set. Lower confidence on its
-   own (many actors share common techniques), but doesn't require the
-   attacker to reuse known infrastructure.
+   Each hit is optionally enriched via the IOC enrichment connector
+   (VirusTotal once wired; a no-op by default).
+2. TTP overlap -- how much of the incident's ATT&CK technique set a tracked
+   actor profile covers. Measured as incident coverage (|overlap| /
+   |incident techniques|), NOT Jaccard: real MITRE intrusion sets know
+   hundreds of techniques, which makes Jaccard vanish for any small incident
+   regardless of how well the actor explains it.
 """
 from sqlalchemy.orm import Session
 
 from app.agents.context import ActorMatch, IocMatch, ThreatIntelReport
+from app.connectors import ioc_enrichment_connector
 from app.models import Alert, ThreatActorProfile, ThreatIndicator
 
-MIN_TECHNIQUE_OVERLAP = 0.3
+# An actor matches when it covers at least half the incident's techniques,
+# with at least 2 techniques in common (1 shared common technique like T1059
+# says nothing). Only the strongest few matches are worth reporting -- common
+# techniques make many real groups partially match any incident.
+MIN_INCIDENT_COVERAGE = 0.5
+MIN_OVERLAP_COUNT = 2
+MAX_ACTOR_MATCHES = 3
 
 
 class ThreatIntelAgent:
@@ -34,6 +44,9 @@ class ThreatIntelAgent:
                             description=indicator.description,
                             threat_actor_name=indicator.threat_actor.name if indicator.threat_actor else None,
                             matched_hostname=alert.asset.hostname,
+                            enrichment=ioc_enrichment_connector.enrich(
+                                indicator.indicator_type, indicator.value
+                            ),
                         )
                     )
 
@@ -42,19 +55,20 @@ class ThreatIntelAgent:
             for profile in db.query(ThreatActorProfile).all():
                 profile_technique_ids = set(profile.associated_technique_ids.split(","))
                 overlap_ids = incident_technique_ids & profile_technique_ids
-                if not overlap_ids:
+                if len(overlap_ids) < MIN_OVERLAP_COUNT:
                     continue
-                jaccard = len(overlap_ids) / len(incident_technique_ids | profile_technique_ids)
-                if jaccard >= MIN_TECHNIQUE_OVERLAP:
+                coverage = len(overlap_ids) / len(incident_technique_ids)
+                if coverage >= MIN_INCIDENT_COVERAGE:
                     actor_matches.append(
                         ActorMatch(
                             threat_actor_name=profile.name,
                             description=profile.description,
-                            technique_overlap=round(jaccard, 2),
+                            technique_overlap=round(coverage, 2),
                             matched_technique_ids=sorted(overlap_ids),
                         )
                     )
-        actor_matches.sort(key=lambda a: a.technique_overlap, reverse=True)
+        actor_matches.sort(key=lambda a: (a.technique_overlap, len(a.matched_technique_ids)), reverse=True)
+        actor_matches = actor_matches[:MAX_ACTOR_MATCHES]
 
         return ThreatIntelReport(ioc_matches=ioc_matches, actor_matches=actor_matches)
 

@@ -27,6 +27,8 @@ class VulnFinding:
     epss_score: float
     kev_listed: bool
     hostname: str
+    kev_due_date: str | None = None  # CISA remediation due date, when KEV-listed
+    kev_ransomware_use: bool = False  # CISA-confirmed use in ransomware campaigns
 
 
 @dataclass
@@ -37,13 +39,14 @@ class IocMatch:
     description: str
     threat_actor_name: str | None
     matched_hostname: str  # which asset's alert text contained the indicator
+    enrichment: dict | None = None  # provider lookup result (e.g. VirusTotal), when wired
 
 
 @dataclass
 class ActorMatch:
     threat_actor_name: str
     description: str
-    technique_overlap: float  # 0-1, jaccard similarity of TTPs
+    technique_overlap: float  # 0-1, share of the incident's techniques this actor is known to use
     matched_technique_ids: list[str]
 
 

@@ -10,6 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.connectors import (
     asset_inventory_connector,
+    attack_catalog_connector,
+    kev_connector,
     siem_connector,
     threat_intel_connector,
     vuln_scanner_connector,
@@ -19,6 +21,7 @@ from app.models import (
     AlertSeverity,
     Asset,
     Exposure,
+    KevEntry,
     ThreatActorProfile,
     ThreatIndicator,
     Vulnerability,
@@ -103,6 +106,60 @@ def ingest_alerts(db: Session) -> list[Alert]:
     return created
 
 
+def ingest_kev_catalog(db: Session) -> int:
+    """Upsert the CISA KEV catalog. Idempotent by cve_id; existing entries
+    are refreshed in place (due dates and ransomware attribution change)."""
+    upserted = 0
+    for raw in kev_connector.fetch_kev_entries():
+        entry = db.get(KevEntry, raw["cve_id"])
+        if entry is None:
+            entry = KevEntry(cve_id=raw["cve_id"])
+            db.add(entry)
+        entry.vendor_project = raw.get("vendor_project", "")
+        entry.product = raw.get("product", "")
+        entry.vulnerability_name = raw.get("vulnerability_name", "")
+        entry.date_added = raw.get("date_added", "")
+        entry.due_date = raw.get("due_date", "")
+        entry.known_ransomware_use = raw.get("known_ransomware_use", False)
+        entry.short_description = raw.get("short_description", "")
+        upserted += 1
+    db.commit()
+    return upserted
+
+
+def apply_kev_enrichment(db: Session) -> int:
+    """Recompute Vulnerability.kev_listed from the KEV table. Only runs when
+    the catalog is populated -- with an empty catalog (offline, no cache) the
+    scanner-provided flags are left untouched."""
+    kev_cve_ids = {row[0] for row in db.query(KevEntry.cve_id).all()}
+    if not kev_cve_ids:
+        return 0
+    updated = 0
+    for vuln in db.query(Vulnerability).all():
+        listed = vuln.cve_id in kev_cve_ids
+        if vuln.kev_listed != listed:
+            vuln.kev_listed = listed
+            updated += 1
+    db.commit()
+    return updated
+
+
+def ingest_actor_groups_from_attack_catalog(db: Session) -> int:
+    """Upsert MITRE intrusion sets as ThreatActorProfile rows (same natural
+    key -- name -- as TIP-fed profiles, so the two sources coexist)."""
+    upserted = 0
+    for raw in attack_catalog_connector.fetch_actor_groups():
+        profile = db.query(ThreatActorProfile).filter_by(name=raw["name"]).one_or_none()
+        if profile is None:
+            profile = ThreatActorProfile(name=raw["name"])
+            db.add(profile)
+        profile.description = raw.get("description", "")
+        profile.associated_technique_ids = ",".join(raw["attack_technique_ids"])
+        upserted += 1
+    db.commit()
+    return upserted
+
+
 def ingest_threat_intel(db: Session) -> dict[str, int]:
     profiles_created = 0
     for raw in threat_intel_connector.fetch_actor_profiles():
@@ -143,13 +200,19 @@ def ingest_threat_intel(db: Session) -> dict[str, int]:
 
 
 def run_full_ingestion(db: Session) -> dict[str, int]:
+    kev_entries = ingest_kev_catalog(db)
     assets = ingest_assets(db)
     vulns = ingest_vulnerabilities(db)
+    kev_enriched = apply_kev_enrichment(db)
     alerts = ingest_alerts(db)
     threat_intel = ingest_threat_intel(db)
+    actor_groups = ingest_actor_groups_from_attack_catalog(db)
     return {
+        "kev_entries": kev_entries,
         "assets": len(assets),
         "vulnerabilities": len(vulns),
+        "kev_flags_updated": kev_enriched,
         "alerts": len(alerts),
         **threat_intel,
+        "attack_actor_groups": actor_groups,
     }

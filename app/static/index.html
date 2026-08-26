@@ -472,15 +472,16 @@ function renderVulns(vulns) {
   `;
 }
 
-function renderThreatIntel(profiles, indicators) {
+function renderThreatIntel(actorData, indicators) {
   const el = $("#threat-intel");
+  const profiles = actorData.profiles || [];
   if (!profiles.length && !indicators.length) { el.innerHTML = `<div class="empty">No threat intel ingested yet.</div>`; return; }
 
   const profileChips = profiles.map(p => `
     <div class="actor-chip">
       <div class="name">${esc(p.name)}</div>
       <div class="desc">${esc(p.description)}</div>
-      <div class="techniques">${p.attack_technique_ids.map(t => `<span class="attack-tag">${esc(t)}</span>`).join("")}</div>
+      <div class="techniques">${p.attack_technique_ids.slice(0, 12).map(t => `<span class="attack-tag">${esc(t)}</span>`).join("")}${p.attack_technique_ids.length > 12 ? `<span class="dim" style="font-size:11px;">+${p.attack_technique_ids.length - 12} more</span>` : ""}</div>
     </div>
   `).join("");
 
@@ -492,7 +493,7 @@ function renderThreatIntel(profiles, indicators) {
   `).join("");
 
   el.innerHTML = `
-    <div class="playbook-log-title" style="margin-bottom:8px;">Tracked actor profiles</div>
+    <div class="playbook-log-title" style="margin-bottom:8px;">Tracked actor profiles${actorData.total > profiles.length ? ` <span class="dim">(showing ${profiles.length} of ${actorData.total})</span>` : ""}</div>
     <div class="chip-row">${profileChips}</div>
     <div class="playbook-log-title" style="margin:14px 0 8px;">Indicators of compromise</div>
     <div class="chip-row">${iocChips}</div>
@@ -533,7 +534,7 @@ async function loadAll() {
     fetchJSON("/attack-coverage"),
     fetchJSON("/playbooks"),
     fetchJSON("/playbook-executions"),
-    fetchJSON("/threat-actor-profiles"),
+    fetchJSON("/threat-actor-profiles?limit=6"),
     fetchJSON("/threat-indicators"),
   ]);
 
