@@ -116,7 +116,28 @@
 
   .decision-monitor { background: rgba(91,122,153,0.18); color: var(--low); }
   .decision-escalate { background: rgba(214,168,58,0.18); color: var(--medium); }
-  .decision-auto_contain { background: rgba(224,71,90,0.18); color: var(--critical); }
+  .decision-contain_pending_approval { background: rgba(224,71,90,0.18); color: var(--critical); }
+
+  .hitl-block {
+    margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+    background: rgba(224,71,90,0.06);
+  }
+  .hitl-block.decided { background: transparent; }
+  .hitl-head { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+  .hitl-status { font-size: 10px; font-weight: 700; text-transform: uppercase; border-radius: 4px; padding: 1px 6px; }
+  .hitl-status.pending { color: var(--critical); border: 1px solid rgba(224,71,90,0.35); }
+  .hitl-status.approved { color: #67c23a; border: 1px solid rgba(103,194,58,0.35); }
+  .hitl-status.rejected { color: var(--text-dim); border: 1px solid var(--border); }
+  .hitl-preview { font-size: 12px; color: var(--text-dim); margin-bottom: 8px; }
+  .hitl-actions { display: flex; gap: 8px; }
+  .hitl-btn {
+    font-size: 12px; font-weight: 600; border-radius: 6px; padding: 5px 12px; cursor: pointer; border: 1px solid var(--border);
+    background: var(--bg-elevated, #1c1f26); color: var(--text);
+  }
+  .hitl-btn.approve { border-color: rgba(103,194,58,0.5); color: #67c23a; }
+  .hitl-btn.reject { border-color: rgba(224,71,90,0.5); color: var(--critical); }
+  .hitl-btn:disabled { opacity: 0.5; cursor: default; }
+  .hitl-decided-note { font-size: 12px; color: var(--text-dim); }
 
   .mode-chip {
     font-size: 10px; text-transform: uppercase; letter-spacing: 0.3px;
@@ -351,6 +372,25 @@ function renderIncidents(incidents) {
 
     const t = inc.triage;
     const d = inc.commander_decision;
+    const approval = inc.containment_approval;
+
+    const hitlBlock = approval ? `
+      <div class="hitl-block ${approval.status !== "pending" ? "decided" : ""}">
+        <div class="hitl-head">
+          <span>Containment approval</span>
+          <span class="hitl-status ${approval.status}">${approval.status}</span>
+        </div>
+        <div class="hitl-preview">Would execute: ${esc(approval.requested_actions)}</div>
+        ${approval.status === "pending" ? `
+          <div class="hitl-actions" id="hitl-actions-${approval.id}">
+            <button class="hitl-btn approve" onclick="decideContainment('${approval.id}', 'approve')">Approve</button>
+            <button class="hitl-btn reject" onclick="decideContainment('${approval.id}', 'reject')">Reject</button>
+          </div>
+        ` : `
+          <div class="hitl-decided-note">${approval.status === "approved" ? "Approved" : "Rejected"} by ${esc(approval.decided_by || "unknown")} ${approval.decided_at ? "· " + fmtTime(approval.decided_at) : ""}${approval.decision_note ? " — " + esc(approval.decision_note) : ""}</div>
+        `}
+      </div>
+    ` : "";
     const modeChip = (mode) => `<span class="mode-chip ${mode === "llm" ? "llm" : ""}">${mode === "llm" ? "LLM reasoning" : "deterministic"}</span>`;
 
     const agentPipelineBlock = (t || d) ? `
@@ -392,6 +432,7 @@ function renderIncidents(incidents) {
             </div>
             <div class="agent-rationale">${esc(d.summary)}</div>
             ${runbookGroupsHtml(d.response_tasks, "AWS IRP playbooks activated by this decision")}
+            ${hitlBlock}
           </div>
         ` : ""}
       </div>
@@ -523,6 +564,27 @@ function renderPlaybookLog(executions, playbooks, incidents) {
       </tbody>
     </table>
   `;
+}
+
+async function decideContainment(approvalId, action) {
+  const approver = window.prompt("Your name/handle (recorded on the approval):", "");
+  if (!approver) return;
+  const note = window.prompt(`Optional note for this ${action}:`, "") || "";
+
+  const actionsEl = document.getElementById(`hitl-actions-${approvalId}`);
+  if (actionsEl) actionsEl.querySelectorAll("button").forEach(b => b.disabled = true);
+
+  try {
+    await fetchJSON(`/containment-approvals/${approvalId}/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approver, note }),
+    });
+    await loadAll();
+  } catch (err) {
+    alert(`Failed to ${action}: ${err.message}`);
+    if (actionsEl) actionsEl.querySelectorAll("button").forEach(b => b.disabled = false);
+  }
 }
 
 async function loadAll() {

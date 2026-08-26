@@ -78,7 +78,7 @@ def test_finding_prefixes_route_to_matching_playbooks(db_session):
 def test_plans_record_matched_finding_types_not_techniques(db_session):
     incident = _aws_ransomware_incident(db_session)
 
-    plans = dispatch_aws_playbooks(incident, ResponseDecision.AUTO_CONTAIN)
+    plans = dispatch_aws_playbooks(incident, ResponseDecision.CONTAIN_PENDING_APPROVAL)
     ransomware = next(p for p in plans if p.category == "aws_ransomware")
 
     assert ransomware.triggered_by_technique_ids == [
@@ -98,7 +98,7 @@ def test_onprem_incident_without_finding_types_matches_no_aws_playbooks(db_sessi
     alert = _alert(db_session, host, "exploit", AlertSeverity.CRITICAL, technique_id="T1190")
     incident = _incident(db_session, host, [alert])
 
-    assert dispatch_aws_playbooks(incident, ResponseDecision.AUTO_CONTAIN) == []
+    assert dispatch_aws_playbooks(incident, ResponseDecision.CONTAIN_PENDING_APPROVAL) == []
 
 
 def test_commander_call_persists_aws_tasks_with_commander_dispatch(db_session):
@@ -107,7 +107,7 @@ def test_commander_call_persists_aws_tasks_with_commander_dispatch(db_session):
     triage = incident_response_agent.triage(db_session, incident)
     decision = incident_commander_agent.decide(db_session, incident, triage)
 
-    assert decision.decision in (ResponseDecision.ESCALATE, ResponseDecision.AUTO_CONTAIN)
+    assert decision.decision in (ResponseDecision.ESCALATE, ResponseDecision.CONTAIN_PENDING_APPROVAL)
     aws_tasks = (
         db_session.query(ResponseTask)
         .filter_by(incident_id=incident.id, dispatched_by="commander")

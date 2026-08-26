@@ -177,8 +177,9 @@ MOCK_ALERTS = [
     # cluster window -> one incident, confidence 0.9. With the live MITRE
     # catalog ingested, real ransomware groups (BlackByte, Scattered Spider)
     # fully cover the T1078/T1490/T1486 set -> criticality CRITICAL ->
-    # AUTO_CONTAIN; offline with only mock actor profiles it lands HIGH ->
-    # ESCALATE. Either decision activates the matching AWS IRP playbooks.
+    # CONTAIN_PENDING_APPROVAL (queued for human sign-off, HITL); offline
+    # with only mock actor profiles it lands HIGH -> ESCALATE. Either
+    # decision activates the matching AWS IRP playbooks.
     {
         "hostname": "aws-prod-account",
         "title": "GuardDuty: EC2 instance credentials used from external IP",

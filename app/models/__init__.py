@@ -1,9 +1,11 @@
 from app.models.orm import (
     Alert,
     AlertSeverity,
+    ApprovalStatus,
     Asset,
     AttackTechnique,
     CommanderDecision,
+    ContainmentApproval,
     DetectionRule,
     EvidenceItem,
     Exposure,
@@ -26,9 +28,11 @@ from app.models.orm import (
 __all__ = [
     "Alert",
     "AlertSeverity",
+    "ApprovalStatus",
     "Asset",
     "AttackTechnique",
     "CommanderDecision",
+    "ContainmentApproval",
     "DetectionRule",
     "EvidenceItem",
     "Exposure",

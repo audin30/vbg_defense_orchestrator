@@ -5,9 +5,12 @@ from app.agents.threat_intel_agent import threat_intel_agent
 from app.models import (
     Alert,
     AlertSeverity,
+    ApprovalStatus,
     Asset,
+    ContainmentApproval,
     Exposure,
     Incident,
+    PlaybookExecution,
     ResponseDecision,
     ThreatActorProfile,
     ThreatIndicator,
@@ -83,7 +86,7 @@ def test_threat_intel_agent_no_match_returns_empty_report(db_session):
     assert report.actor_matches == []
 
 
-def test_critical_incident_with_kev_and_ioc_gets_auto_contain(db_session):
+def test_critical_incident_with_kev_and_ioc_queues_containment_for_approval(db_session):
     web = _asset(db_session, "web-01", criticality=5, exposure=Exposure.INTERNET_FACING)
     db_session.add(Vulnerability(cve_id="CVE-TEST-1", title="t", cvss_score=9.8, kev_listed=True, asset_id=web.id))
     actor = ThreatActorProfile(name="TEST-ACTOR", description="", associated_technique_ids="T1190,T1041")
@@ -99,7 +102,12 @@ def test_critical_incident_with_kev_and_ioc_gets_auto_contain(db_session):
     decision = incident_commander_agent.decide(db_session, incident, triage)
 
     assert triage.criticality == "critical"
-    assert decision.decision == ResponseDecision.AUTO_CONTAIN
+    assert decision.decision == ResponseDecision.CONTAIN_PENDING_APPROVAL
+    # No containment is executed until a human approves -- no playbook runs yet.
+    assert db_session.query(PlaybookExecution).count() == 0
+    approval = db_session.query(ContainmentApproval).filter_by(incident_id=incident.id).one()
+    assert approval.status == ApprovalStatus.PENDING
+    assert approval.requested_actions  # preview of what approval would run
 
 
 def test_low_confidence_incident_gets_monitor_and_no_playbooks(db_session):

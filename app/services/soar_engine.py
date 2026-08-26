@@ -36,12 +36,18 @@ def _meets_trigger(playbook: Playbook, incident: Incident) -> bool:
     return playbook.trigger_attack_technique_id in incident_technique_ids
 
 
+def matching_playbooks(db: Session, incident: Incident) -> list[Playbook]:
+    """Match-only: which playbooks WOULD run for this incident. Used to show
+    a human approver exactly what they're authorizing before anything runs."""
+    return [p for p in db.query(Playbook).all() if _meets_trigger(p, incident)]
+
+
 def evaluate_and_execute(db: Session, incident: Incident) -> list[PlaybookExecution]:
-    """Find every playbook whose trigger matches this incident and run it."""
+    """Run every playbook whose trigger matches this incident. Only call this
+    from the HITL approval path (services/approval_service.py) -- containment
+    is never executed without a recorded human approval."""
     executions = []
-    for playbook in db.query(Playbook).all():
-        if not _meets_trigger(playbook, incident):
-            continue
+    for playbook in matching_playbooks(db, incident):
 
         results = []
         for action_name in playbook.actions.split(","):

@@ -1,25 +1,32 @@
 """Incident Commander Agent.
 
 Final authority in the pipeline: takes the IR Agent's TriageReport and
-decides the response tier. This is the gate on automated containment --
-only CRITICAL-scored incidents get playbooks executed automatically;
-HIGH gets escalated to on-call for a human call before anything disruptive
-happens; everything else is logged for situational awareness.
+decides the response tier. Remediation is never automatic (HITL): the
+strongest decision the Commander can make is to QUEUE containment for
+human approval -- SOAR playbooks execute only when a person approves the
+resulting ContainmentApproval (services/approval_service.py).
 
-    critical  -> AUTO_CONTAIN  (run matching SOAR playbooks now)
-    high      -> ESCALATE      (page on-call, file ticket, wait for a human)
-    medium/low -> MONITOR      (no action, just recorded)
+    critical  -> CONTAIN_PENDING_APPROVAL (file containment request, wait for a human)
+    high      -> ESCALATE                 (page on-call, file ticket, wait for a human)
+    medium/low -> MONITOR                 (no action, just recorded)
 """
 from sqlalchemy.orm import Session
 
 from app.agents import llm_reasoning
 from app.agents.context import TriageReport
 from app.agents.response.aws import dispatch_aws_playbooks
-from app.models import CommanderDecision, Incident, ReasoningMode, ResponseDecision, ResponseTask
+from app.models import (
+    CommanderDecision,
+    ContainmentApproval,
+    Incident,
+    ReasoningMode,
+    ResponseDecision,
+    ResponseTask,
+)
 from app.services import soar_engine
 
 _DECISION_BY_CRITICALITY = {
-    "critical": ResponseDecision.AUTO_CONTAIN,
+    "critical": ResponseDecision.CONTAIN_PENDING_APPROVAL,
     "high": ResponseDecision.ESCALATE,
     "medium": ResponseDecision.MONITOR,
     "low": ResponseDecision.MONITOR,
@@ -28,7 +35,9 @@ _DECISION_BY_CRITICALITY = {
 
 def _deterministic_summary(incident: Incident, triage: TriageReport, decision: ResponseDecision) -> str:
     action = {
-        ResponseDecision.AUTO_CONTAIN: "Automated containment authorized; matching SOAR playbooks executed.",
+        ResponseDecision.CONTAIN_PENDING_APPROVAL: (
+            "Containment queued for human approval; no automated action until an analyst approves."
+        ),
         ResponseDecision.ESCALATE: "Escalated to on-call for human review before containment action.",
         ResponseDecision.MONITOR: "No response action taken; logged for situational awareness.",
     }[decision]
@@ -40,8 +49,9 @@ class IncidentCommanderAgent:
         decision = _DECISION_BY_CRITICALITY[triage.criticality]
 
         # The Commander's call is what activates AWS IRP playbooks: only an
-        # ESCALATE/AUTO_CONTAIN decision routes the incident into the cloud
-        # playbook sub-agents (finding-type-triggered, see agents/response/aws).
+        # ESCALATE/CONTAIN_PENDING_APPROVAL decision routes the incident into
+        # the cloud playbook sub-agents (finding-type-triggered, see
+        # agents/response/aws). These are recommendations, safe pre-approval.
         aws_plans = dispatch_aws_playbooks(incident, decision)
 
         deterministic_text = _deterministic_summary(incident, triage, decision)
@@ -91,10 +101,16 @@ class IncidentCommanderAgent:
                         dispatched_by="commander",
                     )
                 )
+        if decision == ResponseDecision.CONTAIN_PENDING_APPROVAL:
+            # HITL gate: file the containment request with a preview of what
+            # approval would execute. Nothing runs until a human approves.
+            would_run = soar_engine.matching_playbooks(db, incident)
+            preview = (
+                "; ".join(f"{p.name} ({p.actions})" for p in would_run)
+                or "No SOAR playbooks currently match; approval would execute nothing."
+            )
+            db.add(ContainmentApproval(incident_id=incident.id, requested_actions=preview))
         db.commit()
-
-        if decision == ResponseDecision.AUTO_CONTAIN:
-            soar_engine.evaluate_and_execute(db, incident)
 
         return commander_decision
 

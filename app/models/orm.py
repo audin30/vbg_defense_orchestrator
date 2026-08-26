@@ -317,7 +317,34 @@ class ResponseTask(Base):
 class ResponseDecision(str, enum.Enum):
     MONITOR = "monitor"
     ESCALATE = "escalate"
-    AUTO_CONTAIN = "auto_contain"
+    # Containment is never automatic: critical incidents queue a containment
+    # request that a human must approve before any SOAR playbook runs (HITL).
+    CONTAIN_PENDING_APPROVAL = "contain_pending_approval"
+
+
+class ApprovalStatus(str, enum.Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class ContainmentApproval(Base):
+    """Human-in-the-loop gate for remediation. Created by the Commander when
+    an incident warrants containment; SOAR playbooks execute only when a
+    human approves (services/approval_service.py). One per incident."""
+
+    __tablename__ = "containment_approvals"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    incident_id: Mapped[str] = mapped_column(ForeignKey("incidents.id"), unique=True)
+    requested_actions: Mapped[str] = mapped_column(Text)  # human-readable preview of what approval unleashes
+    status: Mapped[ApprovalStatus] = mapped_column(Enum(ApprovalStatus), default=ApprovalStatus.PENDING)
+    requested_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    decision_note: Mapped[str] = mapped_column(Text, default="")
+
+    incident: Mapped["Incident"] = relationship()
 
 
 class CommanderDecision(Base):

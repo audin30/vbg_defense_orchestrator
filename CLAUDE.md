@@ -152,12 +152,27 @@ etc.) rather than raw ORM rows:
   spawns IRP response sub-agents (see "Response sub-agents" below),
   persists an `IncidentTriage` row, hands a `TriageReport` to the Commander
 - **Incident Commander Agent** (`incident_commander_agent.py`) — gates
-  response by criticality: `critical → AUTO_CONTAIN` (executes matching
-  SOAR playbooks via `services/soar_engine`), `high → ESCALATE` (notify
-  only, no automated containment), `medium`/`low → MONITOR` (no action).
-  Persists a `CommanderDecision` row. **This is the only place SOAR
-  playbooks get triggered** — nothing executes automated response outside
-  this gate.
+  response by criticality: `critical → CONTAIN_PENDING_APPROVAL` (files a
+  `ContainmentApproval` previewing which SOAR playbooks would run — nothing
+  executes yet), `high → ESCALATE` (notify only), `medium`/`low → MONITOR`
+  (no action). Persists a `CommanderDecision` row.
+
+### Human-in-the-loop containment approval
+
+**Remediation is never automatic.** The Commander cannot execute SOAR
+playbooks directly — its strongest decision is `CONTAIN_PENDING_APPROVAL`,
+which calls `soar_engine.matching_playbooks()` (match-only, no execution)
+and persists a `ContainmentApproval` row (status `pending`) previewing
+exactly what approval would run. `app/services/approval_service.py` is the
+**only** path from that request to actual execution:
+`approve_containment(db, approval_id, approver, note)` calls
+`soar_engine.evaluate_and_execute()` and marks the incident `contained`;
+`reject_containment()` executes nothing. Both record who decided, when, and
+why. Exposed via `GET /containment-approvals` (analyst inbox — filter
+`?status=pending`) and `POST /containment-approvals/{id}/approve|reject`
+(dashboard renders inline Approve/Reject buttons on `CONTAIN_PENDING_APPROVAL`
+incidents). **This is the only place SOAR playbooks get triggered** —
+nothing executes automated response outside an explicit human approval.
 
 ### Response sub-agents (IRP annexes)
 
@@ -179,7 +194,7 @@ Two invariants to preserve:
    as `ResponseTask` rows (status `recommended`) and surfaced via
    `TriageReport.response_plans`, `triage.response_tasks` in
    `GET /incidents`, and `GET /response-tasks`. Automated containment still
-   happens only through the Commander's SOAR gate.
+   only happens through the Commander's HITL approval gate (see above).
 2. **Ransomware is behavioral, not technique-triggered.** Its
    `matches()` override exists so precursor combinations (e.g. cred dump +
    lateral movement toward backup-tagged assets) can spawn the runbook
@@ -211,8 +226,10 @@ They differ from the generic category sub-agents in two ways:
 2. **Dispatch stage** — activated by the **Commander's decision**, not at
    triage: `incident_commander_agent.decide()` calls
    `dispatch_aws_playbooks(incident, decision)` and only
-   ESCALATE/AUTO_CONTAIN activate playbooks (MONITOR never does),
-   mirroring the AWS triage guide where P1/P2 routes into a full playbook.
+   ESCALATE/CONTAIN_PENDING_APPROVAL activate playbooks (MONITOR never
+   does), mirroring the AWS triage guide where P1/P2 routes into a full
+   playbook. Spawning these is safe pre-approval — they're recommendations,
+   and their output is the material a human reads before approving.
 
 Both tiers persist `ResponseTask` rows; `dispatched_by` ("ir_agent" vs
 "commander") is what separates them — the API surfaces triage-stage tasks
@@ -224,9 +241,10 @@ under `triage.response_tasks` and Commander-stage tasks under
 The mock scenario includes a second, cloud-native attack chain on the
 `aws-prod-account` asset (stolen instance credentials → S3 versioning
 suspension + bulk deletion → attacker KMS key + ransom notes). With live
-threat intel it lands CRITICAL → AUTO_CONTAIN (real ransomware groups fully
-cover its technique set); offline it lands HIGH → ESCALATE. Either way it
-activates the AWS Ransomware and STS Token Abuse playbooks in the demo.
+threat intel it lands CRITICAL → CONTAIN_PENDING_APPROVAL (real ransomware
+groups fully cover its technique set); offline it lands HIGH → ESCALATE.
+Either way it activates the AWS Ransomware and STS Token Abuse playbooks in
+the demo (as recommendations awaiting human sign-off in the CRITICAL case).
 
 ### Evidence collection & preservation
 

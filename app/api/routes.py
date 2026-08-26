@@ -1,12 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.bootstrap import run_bootstrap
 from app.db import get_db
 from app.models import (
     Alert,
+    ApprovalStatus,
     Asset,
     CommanderDecision,
+    ContainmentApproval,
     DetectionRule,
     EvidenceItem,
     Incident,
@@ -19,6 +22,8 @@ from app.models import (
     ThreatIndicator,
     Vulnerability,
 )
+from app.services import approval_service
+from app.services.approval_service import ApprovalNotPending
 from app.services.attack_mapping import coverage_by_tactic, uncovered_techniques
 from app.services.vuln_prioritization import ranked_vulnerabilities
 
@@ -123,6 +128,21 @@ def _triage_dict(t: IncidentTriage | None, db: Session) -> dict | None:
     }
 
 
+def _approval_dict(a: ContainmentApproval | None) -> dict | None:
+    if a is None:
+        return None
+    return {
+        "id": a.id,
+        "incident_id": a.incident_id,
+        "requested_actions": a.requested_actions,
+        "status": a.status.value,
+        "requested_at": a.requested_at.isoformat(),
+        "decided_at": a.decided_at.isoformat() if a.decided_at else None,
+        "decided_by": a.decided_by,
+        "decision_note": a.decision_note,
+    }
+
+
 def _commander_decision_dict(d: CommanderDecision | None, db: Session) -> dict | None:
     if d is None:
         return None
@@ -144,6 +164,7 @@ def _commander_decision_dict(d: CommanderDecision | None, db: Session) -> dict |
 def _incident_dict(i: Incident, db: Session) -> dict:
     triage = db.query(IncidentTriage).filter_by(incident_id=i.id).one_or_none()
     decision = db.query(CommanderDecision).filter_by(incident_id=i.id).one_or_none()
+    approval = db.query(ContainmentApproval).filter_by(incident_id=i.id).one_or_none()
     return {
         "id": i.id,
         "title": i.title,
@@ -164,6 +185,7 @@ def _incident_dict(i: Incident, db: Session) -> dict:
         ],
         "triage": _triage_dict(triage, db),
         "commander_decision": _commander_decision_dict(decision, db),
+        "containment_approval": _approval_dict(approval),
     }
 
 
@@ -313,6 +335,47 @@ def list_response_tasks(db: Session = Depends(get_db)):
         .order_by(ResponseTask.incident_id, ResponseTask.category, ResponseTask.step_order)
         .all()
     ]
+
+
+class ApprovalDecisionRequest(BaseModel):
+    approver: str
+    note: str = ""
+
+
+@router.get("/containment-approvals")
+def list_containment_approvals(status: str | None = None, db: Session = Depends(get_db)):
+    """HITL queue. `status=pending` for the analyst inbox; omit for full history."""
+    query = db.query(ContainmentApproval)
+    if status:
+        query = query.filter_by(status=ApprovalStatus(status))
+    approvals = query.order_by(ContainmentApproval.requested_at.desc()).all()
+    return [_approval_dict(a) for a in approvals]
+
+
+@router.post("/containment-approvals/{approval_id}/approve")
+def approve_containment(approval_id: str, body: ApprovalDecisionRequest, db: Session = Depends(get_db)):
+    """The only path in this app that can trigger SOAR playbook execution --
+    requires an explicit human decision, recorded with who and why."""
+    try:
+        approval, executions = approval_service.approve_containment(db, approval_id, body.approver, body.note)
+    except ApprovalNotPending as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {
+        "approval": _approval_dict(approval),
+        "playbook_executions": [
+            {"id": e.id, "playbook_id": e.playbook_id, "actions_taken": e.actions_taken.split("\n")}
+            for e in executions
+        ],
+    }
+
+
+@router.post("/containment-approvals/{approval_id}/reject")
+def reject_containment(approval_id: str, body: ApprovalDecisionRequest, db: Session = Depends(get_db)):
+    try:
+        approval = approval_service.reject_containment(db, approval_id, body.approver, body.note)
+    except ApprovalNotPending as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"approval": _approval_dict(approval)}
 
 
 @router.get("/playbook-executions")
