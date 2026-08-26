@@ -17,9 +17,10 @@ from app.agents import llm_reasoning
 from app.agents.context import TriageReport
 from app.agents.evidence_planner import build_evidence_plan
 from app.agents.inventory_agent import inventory_agent
+from app.agents.response import dispatch_response_subagents
 from app.agents.threat_intel_agent import threat_intel_agent
 from app.agents.vulnerability_agent import vulnerability_agent
-from app.models import AlertSeverity, EvidenceItem, Incident, IncidentTriage, ReasoningMode
+from app.models import AlertSeverity, EvidenceItem, Incident, IncidentTriage, ReasoningMode, ResponseTask
 
 # Deterministic criticality-score weights. Each bounded contribution sums to
 # at most 1.0. Tune these to match your org's risk appetite -- e.g. raise
@@ -112,6 +113,15 @@ def _threat_intel_summary(threat_intel) -> str:
     return "; ".join(bits)
 
 
+def _response_plan_summary(response_plans) -> str:
+    if not response_plans:
+        return "No IRP category matched; no specialized runbook spawned."
+    return "; ".join(
+        f"{p.runbook_name} ({len(p.steps)} step(s), triggered by {', '.join(p.triggered_by_technique_ids) or 'behavioral match'})"
+        for p in response_plans
+    )
+
+
 def _evidence_summary(evidence_plan) -> str:
     if not evidence_plan:
         return "No evidence items identified."
@@ -130,6 +140,7 @@ class IncidentResponseAgent:
         vuln_mgmt = vulnerability_agent.get_context(db, asset_ids)
         threat_intel = threat_intel_agent.get_context(db, incident.alerts)
         evidence_plan = build_evidence_plan(incident.alerts, threat_intel)
+        response_plans = dispatch_response_subagents(incident)
 
         score = _score(incident, inventory, vuln_mgmt, threat_intel)
         criticality = _bucket(score)
@@ -151,6 +162,7 @@ class IncidentResponseAgent:
                 f"Open vulnerabilities: {_vuln_summary(vuln_mgmt)}\n"
                 f"Threat intel: {_threat_intel_summary(threat_intel)}\n"
                 f"Evidence to preserve: {_evidence_summary(evidence_plan)}\n"
+                f"Response runbooks spawned: {_response_plan_summary(response_plans)}\n"
             ),
             fallback_text=deterministic_text,
             model=llm_reasoning.TRIAGE_MODEL,
@@ -165,6 +177,7 @@ class IncidentResponseAgent:
                 vuln_context_summary=_vuln_summary(vuln_mgmt),
                 threat_intel_summary=_threat_intel_summary(threat_intel),
                 evidence_summary=_evidence_summary(evidence_plan),
+                response_plan_summary=_response_plan_summary(response_plans),
                 rationale=rationale,
                 reasoning_mode=ReasoningMode(mode),
             )
@@ -181,6 +194,20 @@ class IncidentResponseAgent:
                     related_ioc_value=item.related_ioc_value,
                 )
             )
+        for plan in response_plans:
+            for step in plan.steps:
+                db.add(
+                    ResponseTask(
+                        incident_id=incident.id,
+                        category=plan.category,
+                        runbook_name=plan.runbook_name,
+                        phase=step.phase,
+                        step_order=step.order,
+                        action=step.action,
+                        scope_hostname=step.scope_hostname,
+                        triggered_by_technique_ids=",".join(plan.triggered_by_technique_ids),
+                    )
+                )
         db.commit()
 
         return TriageReport(
@@ -193,6 +220,7 @@ class IncidentResponseAgent:
             evidence_plan=evidence_plan,
             rationale=rationale,
             reasoning_mode=mode,
+            response_plans=response_plans,
         )
 
 

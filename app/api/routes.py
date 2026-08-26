@@ -13,6 +13,7 @@ from app.models import (
     IncidentTriage,
     Playbook,
     PlaybookExecution,
+    ResponseTask,
     ThreatActorProfile,
     ThreatIndicator,
     Vulnerability,
@@ -77,10 +78,31 @@ def _evidence_item_dict(e: EvidenceItem) -> dict:
     }
 
 
+def _response_task_dict(t: ResponseTask) -> dict:
+    return {
+        "id": t.id,
+        "incident_id": t.incident_id,
+        "category": t.category,
+        "runbook_name": t.runbook_name,
+        "phase": t.phase,
+        "step_order": t.step_order,
+        "action": t.action,
+        "scope_hostname": t.scope_hostname,
+        "triggered_by_technique_ids": [x for x in t.triggered_by_technique_ids.split(",") if x],
+        "status": t.status.value,
+    }
+
+
 def _triage_dict(t: IncidentTriage | None, db: Session) -> dict | None:
     if t is None:
         return None
     evidence_items = db.query(EvidenceItem).filter_by(incident_id=t.incident_id).all()
+    response_tasks = (
+        db.query(ResponseTask)
+        .filter_by(incident_id=t.incident_id)
+        .order_by(ResponseTask.category, ResponseTask.step_order)
+        .all()
+    )
     return {
         "criticality": t.criticality.value,
         "criticality_score": t.criticality_score,
@@ -89,6 +111,8 @@ def _triage_dict(t: IncidentTriage | None, db: Session) -> dict | None:
         "threat_intel_summary": t.threat_intel_summary,
         "evidence_summary": t.evidence_summary,
         "evidence_items": [_evidence_item_dict(e) for e in evidence_items],
+        "response_plan_summary": t.response_plan_summary,
+        "response_tasks": [_response_task_dict(rt) for rt in response_tasks],
         "rationale": t.rationale,
         "reasoning_mode": t.reasoning_mode.value,
         "created_at": t.created_at.isoformat(),
@@ -236,6 +260,16 @@ def list_threat_indicators(db: Session = Depends(get_db)):
 @router.get("/evidence-items")
 def list_evidence_items(db: Session = Depends(get_db)):
     return [_evidence_item_dict(e) for e in db.query(EvidenceItem).order_by(EvidenceItem.created_at.desc()).all()]
+
+
+@router.get("/response-tasks")
+def list_response_tasks(db: Session = Depends(get_db)):
+    return [
+        _response_task_dict(t)
+        for t in db.query(ResponseTask)
+        .order_by(ResponseTask.incident_id, ResponseTask.category, ResponseTask.step_order)
+        .all()
+    ]
 
 
 @router.get("/playbook-executions")

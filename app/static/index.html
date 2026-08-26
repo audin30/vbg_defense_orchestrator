@@ -148,6 +148,18 @@
     border: 1px solid rgba(224,71,90,0.35); border-radius: 4px; padding: 0 5px; flex-shrink: 0;
   }
 
+  .runbook-group { margin-top: 6px; padding-left: 8px; border-left: 2px solid var(--border); }
+  .runbook-group-title { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+  .phase-tag {
+    font-size: 10px; font-weight: 700; text-transform: uppercase; border-radius: 4px;
+    padding: 0 5px; flex-shrink: 0; width: 66px; text-align: center;
+    border: 1px solid var(--border); color: var(--text-dim);
+  }
+  .phase-tag.phase-analyze { color: #5aa9e6; border-color: rgba(90,169,230,0.35); }
+  .phase-tag.phase-contain { color: var(--critical); border-color: rgba(224,71,90,0.35); }
+  .phase-tag.phase-eradicate { color: #e6a23c; border-color: rgba(230,162,60,0.35); }
+  .phase-tag.phase-recover { color: #67c23a; border-color: rgba(103,194,58,0.35); }
+
   .chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
   .actor-chip, .ioc-chip {
     border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-size: 12px; flex: 1 1 220px;
@@ -346,6 +358,25 @@ function renderIncidents(incidents) {
                 `).join("")}
               </div>
             ` : ""}
+            ${t.response_tasks && t.response_tasks.length ? (() => {
+              const byRunbook = {};
+              t.response_tasks.forEach(rt => { (byRunbook[rt.runbook_name] = byRunbook[rt.runbook_name] || []).push(rt); });
+              return `
+                <div class="agent-context"><b>Response runbooks spawned</b> (${Object.keys(byRunbook).length} sub-agent${Object.keys(byRunbook).length > 1 ? "s" : ""}):</div>
+                ${Object.entries(byRunbook).map(([name, tasks]) => `
+                  <div class="runbook-group">
+                    <div class="runbook-group-title">${esc(name)}${tasks[0].triggered_by_technique_ids.length ? ` <span class="dim">· triggered by ${tasks[0].triggered_by_technique_ids.map(esc).join(", ")}</span>` : ""}</div>
+                    ${tasks.map(rt => `
+                      <div class="evidence-row">
+                        <span class="phase-tag phase-${esc(rt.phase)}">${esc(rt.phase)}</span>
+                        <span class="evidence-type">${esc(rt.action)}</span>
+                        <span class="evidence-source">${rt.scope_hostname ? esc(rt.scope_hostname) : "incident-wide"}</span>
+                      </div>
+                    `).join("")}
+                  </div>
+                `).join("")}
+              `;
+            })() : ""}
           </div>
         ` : ""}
         ${d ? `

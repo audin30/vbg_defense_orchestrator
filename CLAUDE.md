@@ -99,6 +99,7 @@ etc.) rather than raw ORM rows:
   `_ASSET_CRITICALITY_WEIGHT`, `_EXPOSURE_BONUS`, `_KEV_BONUS`,
   `_THREAT_INTEL_BONUS` — sum to 1.0 by construction, tune to change risk
   appetite), builds an evidence collection/preservation plan (see below),
+  spawns IRP response sub-agents (see "Response sub-agents" below),
   persists an `IncidentTriage` row, hands a `TriageReport` to the Commander
 - **Incident Commander Agent** (`incident_commander_agent.py`) — gates
   response by criticality: `critical → AUTO_CONTAIN` (executes matching
@@ -107,6 +108,38 @@ etc.) rather than raw ORM rows:
   Persists a `CommanderDecision` row. **This is the only place SOAR
   playbooks get triggered** — nothing executes automated response outside
   this gate.
+
+### Response sub-agents (IRP annexes)
+
+`app/agents/response/` holds one sub-agent per Incident Response Playbook
+category — malware, ransomware, phishing, credential compromise, lateral
+movement, data exfiltration — each a `ResponseSubAgent` subclass
+(`base.py`) carrying its own runbook: an ordered list of
+`(phase, action, per_affected_host)` steps across the NIST 800-61 phases
+(`analyze`/`contain`/`eradicate`/`recover`). During `triage()`, the IR
+Agent calls `dispatch_response_subagents(incident)`
+(`response/__init__.py`), which classifies the incident by its observed
+ATT&CK technique IDs and spawns every sub-agent whose trigger set
+intersects them; each spawned sub-agent instantiates its runbook, scoping
+per-host steps to the assets its trigger techniques were actually seen on.
+
+Two invariants to preserve:
+
+1. **Sub-agents recommend, they never execute.** Their output is persisted
+   as `ResponseTask` rows (status `recommended`) and surfaced via
+   `TriageReport.response_plans`, `triage.response_tasks` in
+   `GET /incidents`, and `GET /response-tasks`. Automated containment still
+   happens only through the Commander's SOAR gate.
+2. **Ransomware is behavioral, not technique-triggered.** Its
+   `matches()` override exists so precursor combinations (e.g. cred dump +
+   lateral movement toward backup-tagged assets) can spawn the runbook
+   before T1486 fires — the heuristic body is a deliberate placeholder
+   (returns `False` beyond the direct T1486/T1490 triggers), same pattern
+   as `compute_risk_score()`.
+
+To add a category: subclass `ResponseSubAgent` in a new
+`app/agents/response/<category>.py` and append its instance to
+`RESPONSE_SUBAGENTS` in `response/__init__.py`.
 
 ### Evidence collection & preservation
 

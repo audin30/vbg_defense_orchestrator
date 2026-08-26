@@ -104,6 +104,28 @@ class EvidenceFinding:
 
 
 @dataclass
+class RunbookStep:
+    """One action from a response sub-agent's runbook, ordered within its plan."""
+
+    order: int
+    phase: str  # "analyze" | "contain" | "eradicate" | "recover"
+    action: str
+    scope_hostname: str | None  # None = incident-wide, else scoped to one asset
+
+
+@dataclass
+class ResponsePlan:
+    """One IRP-category response sub-agent's output: its runbook instantiated
+    against this incident's affected assets. Steps are recommendations only --
+    execution authority stays with the Incident Commander gate."""
+
+    category: str  # e.g. "malware", "ransomware", "phishing"
+    runbook_name: str
+    triggered_by_technique_ids: list[str]
+    steps: list[RunbookStep] = field(default_factory=list)
+
+
+@dataclass
 class TriageReport:
     """The Incident Response Agent's handoff to the Incident Commander Agent."""
 
@@ -116,3 +138,4 @@ class TriageReport:
     evidence_plan: list[EvidenceFinding]
     rationale: str
     reasoning_mode: str  # "deterministic" | "llm"
+    response_plans: list[ResponsePlan] = field(default_factory=list)

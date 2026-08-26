@@ -228,6 +228,7 @@ class IncidentTriage(Base):
     vuln_context_summary: Mapped[str] = mapped_column(Text)
     threat_intel_summary: Mapped[str] = mapped_column(Text)
     evidence_summary: Mapped[str] = mapped_column(Text, default="")
+    response_plan_summary: Mapped[str] = mapped_column(Text, default="")
     rationale: Mapped[str] = mapped_column(Text)
     reasoning_mode: Mapped[ReasoningMode] = mapped_column(Enum(ReasoningMode))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
@@ -254,6 +255,37 @@ class EvidenceItem(Base):
         ForeignKey("attack_techniques.id"), nullable=True
     )
     related_ioc_value: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class ResponseTaskStatus(str, enum.Enum):
+    RECOMMENDED = "recommended"
+    IN_PROGRESS = "in_progress"
+    DONE = "done"
+    SKIPPED = "skipped"
+
+
+class ResponseTask(Base):
+    """One runbook step recommended by an IRP-category response sub-agent
+    (malware, ransomware, phishing, ...) spawned by the Incident Response
+    Agent during triage. These are recommendations for analysts -- automated
+    containment still only happens through the Incident Commander's SOAR
+    playbook gate."""
+
+    __tablename__ = "response_tasks"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    incident_id: Mapped[str] = mapped_column(ForeignKey("incidents.id"))
+    category: Mapped[str] = mapped_column(String)  # e.g. "malware", "ransomware"
+    runbook_name: Mapped[str] = mapped_column(String)
+    phase: Mapped[str] = mapped_column(String)  # analyze | contain | eradicate | recover
+    step_order: Mapped[int] = mapped_column(Integer)
+    action: Mapped[str] = mapped_column(Text)
+    scope_hostname: Mapped[str | None] = mapped_column(String, nullable=True)  # None = incident-wide
+    triggered_by_technique_ids: Mapped[str] = mapped_column(String, default="")  # comma-separated
+    status: Mapped[ResponseTaskStatus] = mapped_column(
+        Enum(ResponseTaskStatus), default=ResponseTaskStatus.RECOMMENDED
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
