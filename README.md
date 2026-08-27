@@ -44,15 +44,18 @@ bootstrap. Delete it to reset all state.
 - **Correlates** related alerts into incidents — per-asset clustering by time
   window, then chained across assets when a lateral-movement technique
   bridges them.
-- **Gates before triaging.** The Incident Commander screens every correlated
-  incident on cheap signals alone (severity, confidence, one Inventory Agent
-  lookup) before the expensive pipeline runs at all — incidents that don't
-  clear the gate get a direct MONITOR decision with no triage, evidence
+- **Analyzes risk before triaging.** A dedicated Threat Analyzer Agent
+  correlates asset, vulnerability, and threat-intel data for every correlated
+  incident into a deterministic weighted risk score, ranks the whole batch by
+  that score, and recommends only the highest-risk cases for full triage. The
+  Incident Commander's gate acts on that recommendation — incidents it
+  doesn't clear get a direct MONITOR decision with no triage, evidence
   planning, or sub-agent dispatch spent on them.
-- **Triages** each incident that clears the gate through a five-agent
-  pipeline that gathers asset context, open vulnerabilities (KEV-prioritized),
-  and threat intel matches (IOC hits + ATT&CK TTP overlap against tracked
-  actor profiles), then computes a deterministic weighted criticality score.
+- **Triages** each recommended incident through a pipeline that gathers asset
+  context, open vulnerabilities (KEV-prioritized), and threat intel matches
+  (IOC hits + ATT&CK TTP overlap against tracked actor profiles) — reusing
+  the Threat Analyzer's already-computed risk score rather than rescoring —
+  then builds the evidence and response plan around it.
 - **Plans evidence collection** — every recommended artifact is traceable to
   either the ATT&CK technique observed or a confirmed IOC match.
 - **Spawns response runbooks** — IRP-category sub-agents (malware,
@@ -72,8 +75,8 @@ bootstrap. Delete it to reset all state.
 ## Architecture
 
 A full pipeline diagram — every stage from raw feed to the human-approval
-gate, with every arrow labeled, including the Commander's pre-triage `gate()`
-step — is below (or as a vector PDF at
+gate, with every arrow labeled, including the Threat Analyzer Agent and the
+Commander's pre-triage `gate()` step — is below (or as a vector PDF at
 [`docs/architecture-diagram.pdf`](docs/architecture-diagram.pdf)).
 
 ![Pipeline architecture diagram](docs/architecture-diagram.png)
@@ -108,7 +111,7 @@ implementation yet — see [Known incomplete pieces](#known-incomplete-pieces).
 
 ### Agent pipeline
 
-Five agents in `app/agents/`, each wrapping services behind a typed contract
+Six agents in `app/agents/`, each wrapping services behind a typed contract
 (`app/agents/context.py`) rather than raw ORM rows:
 
 | Agent | Role |
@@ -116,17 +119,22 @@ Five agents in `app/agents/`, each wrapping services behind a typed contract
 | Inventory | Asset criticality/exposure/business-unit context |
 | Vulnerability Management | Open findings on affected assets, KEV-first |
 | Threat Intel | IOC matches + ATT&CK technique-overlap actor matching |
-| **Incident Response** | Hub — synthesizes the three above, scores criticality, builds the evidence plan, spawns IRP response sub-agents |
-| **Incident Commander** | Bookends the pipeline: `gate()` screens each correlated incident *before* triage runs (cheap signals only — no LLM, no vuln/threat-intel lookups); `decide()` sets the response tier after triage. The only place SOAR playbooks get triggered — and only after human approval |
+| **Threat Analyzer** | Runs first: correlates the three above into a weighted risk score per incident, ranks the whole batch by risk, and recommends the highest-risk cases for full triage |
+| **Incident Response** | Hub for recommended incidents — reuses the Threat Analyzer's score/context (no rescoring), builds the evidence plan, spawns IRP response sub-agents |
+| **Incident Commander** | Bookends the pipeline: `gate()` delegates to the Threat Analyzer and acts on its recommendation *before* triage runs; `decide()` sets the response tier after triage. The only place SOAR playbooks get triggered — and only after human approval |
 
-The Commander's `gate()` is what keeps the expensive pipeline from running on
-obvious background noise: an incident routes into full IR Agent triage if its
-severity is high/critical, its correlation confidence clears a threshold, or
-an affected asset is internet-facing / high-criticality (one Inventory Agent
-lookup — no vuln scan, no threat intel, no LLM call). Anything that doesn't
-clear the gate gets a direct `MONITOR` `CommanderDecision` via `skip()`, with
-no `IncidentTriage` row, no evidence plan, and no response sub-agents spawned
-for it.
+The **Threat Analyzer Agent** is what keeps the expensive evidence-planning/
+response-dispatch/LLM work from running on obvious background noise: it
+computes one deterministic weighted risk score per incident (correlation
+confidence, severity, asset criticality/exposure, KEV-listed vulnerabilities,
+threat-intel IOC/TTP overlap), buckets it into a risk rating, and recommends
+anything rated high or critical. The Commander's `gate()` just acts on that
+recommendation — anything not recommended gets a direct `MONITOR`
+`CommanderDecision` via `skip()`, with no `IncidentTriage` row, no evidence
+plan, and no response sub-agents spawned for it. Every incident's assessment
+is ranked against the rest of its batch (`risk_rank`, 1 = highest) via
+`GET /threat-analyses`, so an analyst can see which cases to look at first
+independent of the recommend/skip split.
 
 Actor matching uses **incident coverage**, not Jaccard similarity — a real
 intrusion set with hundreds of known techniques would otherwise never
@@ -201,6 +209,9 @@ in-memory SQLite regardless of `DATABASE_URL`.
 
 `app/static/index.html` is a single self-contained file (inline CSS/JS, no
 build step) served at `GET /`. It calls the JSON API directly via `fetch()`.
+`GET /threat-analyses` (highest risk first, `?recommended_only=true` filter)
+and the `threat_analysis` field embedded per incident in `GET /incidents`
+are exposed but not yet rendered in the dashboard.
 
 ## Known incomplete pieces
 

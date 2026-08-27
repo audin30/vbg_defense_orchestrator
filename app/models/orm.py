@@ -235,6 +235,29 @@ class ReasoningMode(str, enum.Enum):
     LLM = "llm"
 
 
+class ThreatAnalysis(Base):
+    """The Threat Analyzer Agent's pre-triage risk assessment -- one row per
+    incident, produced by correlating asset, vulnerability, and threat-intel
+    data before the Incident Response Agent ever runs. `recommended` is what
+    the Incident Commander's gate() consults to decide whether an incident
+    is worth full triage; `risk_rank` orders every incident assessed in the
+    same bootstrap batch by risk_score (1 = highest), so the Commander can
+    see which cases to look at first."""
+
+    __tablename__ = "threat_analyses"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    incident_id: Mapped[str] = mapped_column(ForeignKey("incidents.id"), unique=True)
+    risk_score: Mapped[float] = mapped_column(Float)  # 0-1
+    risk_rating: Mapped[AlertSeverity] = mapped_column(Enum(AlertSeverity))
+    recommended: Mapped[bool] = mapped_column(Boolean, default=False)  # cleared the gate into full triage
+    risk_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 1 = highest risk this batch
+    rationale: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    incident: Mapped["Incident"] = relationship()
+
+
 class IncidentTriage(Base):
     """The Incident Response Agent's structured handoff to the Incident
     Commander Agent -- one row per incident, produced by cross-referencing

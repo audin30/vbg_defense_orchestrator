@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A defense orchestrator combining SIEM alert correlation, MITRE ATT&CK-mapped
 detection coverage, asset-weighted vulnerability prioritization, and a
-five-agent SOAR triage/response pipeline. Backend is FastAPI + SQLAlchemy
+six-agent SOAR triage/response pipeline. Backend is FastAPI + SQLAlchemy
 (SQLite), frontend is a single static HTML/vanilla-JS dashboard with no
 build step, served by FastAPI itself.
 
@@ -125,15 +125,22 @@ exposed as `POST /bootstrap`):
    unassigned alerts per-asset by time window, then chains clusters across
    assets when a lateral-movement technique (T1021/T1570/T1091/T1210)
    bridges them within `CROSS_ASSET_CHAIN_WINDOW`
-5. For each new `Incident`: `agents.incident_response_agent.triage()` then
-   `agents.incident_commander_agent.decide()` (see "Agent pipeline" below)
+5. For each new `Incident`: `agents.incident_commander_agent.gate()`
+   delegates to `agents.threat_analyzer_agent.analyze()` for a risk
+   assessment. If `.recommended`, `agents.incident_response_agent.triage()`
+   then `agents.incident_commander_agent.decide()` run; otherwise
+   `agents.incident_commander_agent.skip()` records a direct `MONITOR`
+   decision with no triage at all (see "Agent pipeline" below)
+6. The batch of `ThreatAnalysis` rows just created is re-queried and ranked
+   by `risk_score` descending, writing `risk_rank` (1 = highest risk) onto
+   each — this is what a "highest risk first" analyst view sorts by
 
 ### Agent pipeline
 
-Five agents in `app/agents/`, each wrapping existing services behind a
-typed contract (`app/agents/context.py` dataclasses — `AssetFinding`,
-`VulnFinding`, `IocMatch`, `ActorMatch`, `EvidenceFinding`, `TriageReport`,
-etc.) rather than raw ORM rows:
+Six agents in `app/agents/`, each wrapping existing services behind a typed
+contract (`app/agents/context.py` dataclasses — `AssetFinding`,
+`VulnFinding`, `IocMatch`, `ActorMatch`, `EvidenceFinding`, `RiskAssessment`,
+`TriageReport`, etc.) rather than raw ORM rows:
 
 - **Inventory Agent** (`inventory_agent.py`) — asset criticality/exposure/
   business-unit context for a set of asset IDs
@@ -144,16 +151,35 @@ etc.) rather than raw ORM rows:
   asset it was found on, via `IocMatch.matched_hostname`): direct IOC
   substring match against alert text, and ATT&CK technique-set Jaccard
   overlap against tracked actor profiles (`MIN_TECHNIQUE_OVERLAP = 0.3`)
-- **Incident Response Agent** (`incident_response_agent.py`) — the hub:
-  calls the three agents above, computes a deterministic weighted
-  criticality score (`_CONFIDENCE_WEIGHT`, `_SEVERITY_WEIGHT`,
+- **Threat Analyzer Agent** (`threat_analyzer_agent.py`) — runs first, right
+  after correlation and before the Commander's gate or the IR Agent do
+  anything: calls the three agents above, computes a deterministic weighted
+  risk score (`_CONFIDENCE_WEIGHT`, `_SEVERITY_WEIGHT`,
   `_ASSET_CRITICALITY_WEIGHT`, `_EXPOSURE_BONUS`, `_KEV_BONUS`,
   `_THREAT_INTEL_BONUS` — sum to 1.0 by construction, tune to change risk
-  appetite), builds an evidence collection/preservation plan (see below),
-  spawns IRP response sub-agents (see "Response sub-agents" below),
-  persists an `IncidentTriage` row, hands a `TriageReport` to the Commander
-- **Incident Commander Agent** (`incident_commander_agent.py`) — gates
-  response by criticality: `critical → CONTAIN_PENDING_APPROVAL` (files a
+  appetite — this is the *canonical* scoring implementation, not
+  duplicated elsewhere), buckets it into a `risk_rating`
+  (low/medium/high/critical), and sets `recommended = True` at high/
+  critical. Persists a `ThreatAnalysis` row and returns a `RiskAssessment`
+  carrying both the score and the already-gathered
+  Inventory/Vulnerability/Threat-Intel reports, so nothing downstream has
+  to re-query them
+- **Incident Response Agent** (`incident_response_agent.py`) — the hub for
+  incidents the Analyzer recommends: `triage()` takes the `RiskAssessment`
+  (reusing its score/rating/context reports rather than recomputing),
+  builds an evidence collection/preservation plan (see below), spawns IRP
+  response sub-agents (see "Response sub-agents" below), persists an
+  `IncidentTriage` row, hands a `TriageReport` to the Commander. Calling
+  `triage()` without a `RiskAssessment` (e.g. directly from a test) still
+  works — it calls the Threat Analyzer Agent inline first
+- **Incident Commander Agent** (`incident_commander_agent.py`) — bookends
+  the pipeline around the two agents above. `gate(db, incident)` delegates
+  straight to the Threat Analyzer and returns its `RiskAssessment`; callers
+  route to `incident_response_agent.triage()` when `.recommended` is `True`
+  or call `skip()` otherwise (records a `MONITOR` `CommanderDecision`
+  directly, citing the Analyzer's rationale, with no `IncidentTriage` row).
+  `decide(db, incident, triage)` is the final response-tier call, run only
+  for triaged incidents: `critical → CONTAIN_PENDING_APPROVAL` (files a
   `ContainmentApproval` previewing which SOAR playbooks would run — nothing
   executes yet), `high → ESCALATE` (notify only), `medium`/`low → MONITOR`
   (no action). Persists a `CommanderDecision` row.
@@ -316,17 +342,21 @@ way, or the correlation/threat-intel-matching demo value is lost.
 All SQLAlchemy models live in one file, `app/models/orm.py` (re-exported
 via `app/models/__init__.py`). Notable relationships: `Alert.incident_id`
 is nullable and set by the correlation service, not at alert-creation time;
-`IncidentTriage` and `CommanderDecision` are both one-per-incident
-(`unique=True` on `incident_id`).
+`ThreatAnalysis`, `IncidentTriage`, and `CommanderDecision` are all
+one-per-incident (`unique=True` on `incident_id`). `ThreatAnalysis.risk_rank`
+is the odd one out — it's not set at creation, only after bootstrap ranks
+the whole batch of incidents processed in that run.
 
 ### Frontend
 
 `app/static/index.html` is a single self-contained file (inline CSS/JS, no
 build step) served at `GET /` by `app/main.py`. It calls the JSON API
 directly via `fetch()` — `/assets`, `/vulnerabilities`, `/alerts`,
-`/incidents` (embeds `triage`, including `triage.evidence_items`, +
-`commander_decision` per incident), `/attack-coverage`,
-`/threat-actor-profiles`, `/threat-indicators`, `/evidence-items`,
-`/playbooks`, `/playbook-executions` — and a "Run Ingestion + Refresh"
-button that POSTs `/bootstrap` then reloads. Dark-theme only, no light-mode
-handling.
+`/incidents` (embeds `threat_analysis` + `triage`, including
+`triage.evidence_items`, + `commander_decision` per incident),
+`/attack-coverage`, `/threat-actor-profiles`, `/threat-indicators`,
+`/evidence-items`, `/playbooks`, `/playbook-executions` — and a "Run
+Ingestion + Refresh" button that POSTs `/bootstrap` then reloads.
+Dark-theme only, no light-mode handling. `GET /threat-analyses` (highest
+`risk_score` first, `?recommended_only=true` filter) is exposed but not
+yet rendered anywhere in the dashboard.

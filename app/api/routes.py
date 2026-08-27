@@ -19,6 +19,7 @@ from app.models import (
     PlaybookExecution,
     ResponseTask,
     ThreatActorProfile,
+    ThreatAnalysis,
     ThreatIndicator,
     Vulnerability,
 )
@@ -128,6 +129,19 @@ def _triage_dict(t: IncidentTriage | None, db: Session) -> dict | None:
     }
 
 
+def _threat_analysis_dict(t: ThreatAnalysis | None) -> dict | None:
+    if t is None:
+        return None
+    return {
+        "risk_score": t.risk_score,
+        "risk_rating": t.risk_rating.value,
+        "recommended": t.recommended,
+        "risk_rank": t.risk_rank,
+        "rationale": t.rationale,
+        "created_at": t.created_at.isoformat(),
+    }
+
+
 def _approval_dict(a: ContainmentApproval | None) -> dict | None:
     if a is None:
         return None
@@ -162,6 +176,7 @@ def _commander_decision_dict(d: CommanderDecision | None, db: Session) -> dict |
 
 
 def _incident_dict(i: Incident, db: Session) -> dict:
+    threat_analysis = db.query(ThreatAnalysis).filter_by(incident_id=i.id).one_or_none()
     triage = db.query(IncidentTriage).filter_by(incident_id=i.id).one_or_none()
     decision = db.query(CommanderDecision).filter_by(incident_id=i.id).one_or_none()
     approval = db.query(ContainmentApproval).filter_by(incident_id=i.id).one_or_none()
@@ -183,6 +198,7 @@ def _incident_dict(i: Incident, db: Session) -> dict:
             }
             for e in i.playbook_executions
         ],
+        "threat_analysis": _threat_analysis_dict(threat_analysis),
         "triage": _triage_dict(triage, db),
         "commander_decision": _commander_decision_dict(decision, db),
         "containment_approval": _approval_dict(approval),
@@ -319,6 +335,21 @@ def list_threat_indicators(db: Session = Depends(get_db)):
             "threat_actor_name": i.threat_actor.name if i.threat_actor else None,
         }
         for i in db.query(ThreatIndicator).all()
+    ]
+
+
+@router.get("/threat-analyses")
+def list_threat_analyses(recommended_only: bool = False, db: Session = Depends(get_db)):
+    """The Threat Analyzer Agent's per-incident risk assessments, highest
+    risk first -- the Commander's recommended-cases inbox. `recommended_only`
+    filters to incidents that cleared the gate into full IR Agent triage."""
+    query = db.query(ThreatAnalysis)
+    if recommended_only:
+        query = query.filter_by(recommended=True)
+    analyses = query.order_by(ThreatAnalysis.risk_score.desc()).all()
+    return [
+        {"incident_id": a.incident_id, **_threat_analysis_dict(a)}
+        for a in analyses
     ]
 
 

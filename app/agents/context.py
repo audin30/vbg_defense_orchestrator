@@ -129,6 +129,23 @@ class ResponsePlan:
 
 
 @dataclass
+class RiskAssessment:
+    """The Threat Analyzer Agent's handoff to the Incident Commander's gate
+    and (reused, to avoid re-querying) the Incident Response Agent's triage.
+    Produced before any evidence planning or response sub-agent dispatch --
+    purely a correlated risk rating."""
+
+    incident_id: str
+    risk_score: float  # 0-1
+    risk_rating: str  # AlertSeverity value: low/medium/high/critical
+    inventory: InventoryReport
+    vuln_management: VulnManagementReport
+    threat_intel: ThreatIntelReport
+    rationale: str
+    recommended: bool  # True = clears the gate into full IR Agent triage
+
+
+@dataclass
 class TriageReport:
     """The Incident Response Agent's handoff to the Incident Commander Agent."""
 

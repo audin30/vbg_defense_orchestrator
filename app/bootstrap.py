@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.agents import incident_commander_agent, incident_response_agent
 from app.db import Base, SessionLocal, engine
-from app.models import DetectionRule, Playbook
+from app.models import DetectionRule, Playbook, ThreatAnalysis
 from app.seed.detections_and_playbooks import DETECTION_RULES, PLAYBOOKS
 from app.services import correlation_service, ingestion_service
 from app.services.attack_mapping import seed_attack_techniques
@@ -71,15 +71,32 @@ def run_bootstrap() -> dict:
         decisions_by_type = {}
         gated_in = 0
         for incident in incidents:
-            if incident_commander_agent.gate(db, incident):
+            # Threat Analyzer Agent correlates asset/vuln/threat-intel data
+            # and recommends whether this incident is worth full triage --
+            # the Commander's gate just acts on that recommendation.
+            risk_assessment = incident_commander_agent.gate(db, incident)
+            if risk_assessment.recommended:
                 gated_in += 1
-                triage = incident_response_agent.triage(db, incident)
+                triage = incident_response_agent.triage(db, incident, risk_assessment)
                 decision = incident_commander_agent.decide(db, incident, triage)
             else:
-                decision = incident_commander_agent.skip(db, incident)
+                decision = incident_commander_agent.skip(db, incident, risk_assessment)
             decisions_by_type[decision.decision.value] = decisions_by_type.get(decision.decision.value, 0) + 1
         summary["commander_decisions"] = decisions_by_type
         summary["incidents_gated_into_triage"] = gated_in
+
+        # Rank this batch's incidents by risk so the Commander's inbox can
+        # surface the highest-risk cases first, independent of recommended/
+        # skipped status.
+        analyses = (
+            db.query(ThreatAnalysis)
+            .filter(ThreatAnalysis.incident_id.in_([i.id for i in incidents]))
+            .order_by(ThreatAnalysis.risk_score.desc())
+            .all()
+        )
+        for rank, analysis in enumerate(analyses, start=1):
+            analysis.risk_rank = rank
+        db.commit()
 
         return summary
     finally:
