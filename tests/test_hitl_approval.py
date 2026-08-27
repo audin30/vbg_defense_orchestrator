@@ -16,7 +16,10 @@ from app.models import (
     AlertSeverity,
     ApprovalStatus,
     Asset,
+    CommanderContainmentReview,
+    CommanderDecision,
     ContainmentApproval,
+    ContainmentOutcome,
     Exposure,
     Incident,
     IncidentStatus,
@@ -153,6 +156,56 @@ def test_cannot_decide_an_already_decided_approval(db_session):
 def test_deciding_unknown_approval_raises(db_session):
     with pytest.raises(ApprovalNotPending):
         approval_service.approve_containment(db_session, "does-not-exist", approver="analyst")
+
+
+def test_reject_containment_falls_back_to_escalate(db_session):
+    incident = _critical_incident_with_matching_playbook(db_session)
+    triage = incident_response_agent.triage(db_session, incident)
+    incident_commander_agent.decide(db_session, incident, triage)
+    approval = db_session.query(ContainmentApproval).filter_by(incident_id=incident.id).one()
+
+    approval_service.reject_containment(db_session, approval.id, approver="analyst@example.com", note="false positive")
+
+    decision = db_session.query(CommanderDecision).filter_by(incident_id=incident.id).one()
+    assert decision.decision == ResponseDecision.ESCALATE
+
+    review = db_session.query(CommanderContainmentReview).filter_by(incident_id=incident.id).one()
+    assert review.outcome == ContainmentOutcome.REJECTED
+    assert review.prior_decision == ResponseDecision.CONTAIN_PENDING_APPROVAL
+    assert review.new_decision == ResponseDecision.ESCALATE
+
+
+def test_approve_containment_with_no_matching_playbook_falls_back_to_escalate(db_session):
+    # CRITICAL via KEV + confidence, but no seeded Playbook triggers on its
+    # technique -- approval succeeds but executes nothing.
+    web = _asset(db_session, "web-01")
+    db_session.add(Vulnerability(cve_id="CVE-TEST-1", title="t", cvss_score=9.8, kev_listed=True, asset_id=web.id))
+    actor = ThreatActorProfile(name="TEST-ACTOR", description="", associated_technique_ids="T1003,T1041")
+    db_session.add(actor)
+    db_session.flush()
+    db_session.add(ThreatIndicator(indicator_type="ip", value="203.0.113.99", threat_actor_id=actor.id))
+    db_session.commit()
+    alert = _alert(db_session, web, "lsass access", AlertSeverity.CRITICAL, "T1003", description="hit from 203.0.113.99")
+    incident = _incident(db_session, web, [alert])
+
+    triage = incident_response_agent.triage(db_session, incident)
+    decision = incident_commander_agent.decide(db_session, incident, triage)
+    assert decision.decision == ResponseDecision.CONTAIN_PENDING_APPROVAL
+    approval = db_session.query(ContainmentApproval).filter_by(incident_id=incident.id).one()
+
+    approved, executions = approval_service.approve_containment(db_session, approval.id, approver="analyst@example.com")
+
+    assert approved.status == ApprovalStatus.APPROVED
+    assert executions == []
+    db_session.refresh(incident)
+    assert incident.status == IncidentStatus.OPEN  # never marked contained -- nothing executed
+
+    new_decision = db_session.query(CommanderDecision).filter_by(incident_id=incident.id).one()
+    assert new_decision.decision == ResponseDecision.ESCALATE
+
+    review = db_session.query(CommanderContainmentReview).filter_by(incident_id=incident.id).one()
+    assert review.outcome == ContainmentOutcome.NO_PLAYBOOK_MATCH
+    assert review.new_decision == ResponseDecision.ESCALATE
 
 
 def test_escalate_and_monitor_never_create_containment_approval(db_session):

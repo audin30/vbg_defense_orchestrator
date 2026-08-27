@@ -63,6 +63,12 @@ bootstrap. Delete it to reset all state.
   exfiltration) at triage time, and a second tier of AWS IRP playbook
   sub-agents (credential compromise, ransomware, data access, DoS, insider
   threat, and more) once the Commander escalates or queues containment.
+- **Lets a human commander send a risk assessment back for re-analysis.** A
+  disagreement with the Threat Analyzer's rating (`POST
+  /incidents/{id}/reanalyze`, with a required reason and an optional rating
+  floor that can only raise the rating, never lower it) is capped at one
+  retry per incident and logged to a `CommanderReanalysisRequest` audit
+  trail (`GET /reanalysis-requests`) — a bounded escalation, not a loop.
 - **Gates all remediation behind human approval.** The Incident Commander
   never executes containment automatically — a critical incident files a
   containment request previewing exactly which SOAR playbooks would run;
@@ -75,8 +81,10 @@ bootstrap. Delete it to reset all state.
 ## Architecture
 
 A full pipeline diagram — every stage from raw feed to the human-approval
-gate, with every arrow labeled, including the Threat Analyzer Agent and the
-Commander's pre-triage `gate()` step — is below (or as a vector PDF at
+gate, with every arrow labeled, including the Threat Analyzer Agent, the
+Commander's pre-triage `gate()` step, and the two bounded human feedback
+loops (re-analysis, and the containment-outcome fallback to `ESCALATE`) —
+is below (or as a vector PDF at
 [`docs/architecture-diagram.pdf`](docs/architecture-diagram.pdf)).
 
 ![Pipeline architecture diagram](docs/architecture-diagram.png)
@@ -141,6 +149,15 @@ intrusion set with hundreds of known techniques would otherwise never
 register against a small incident. A match requires the actor to cover at
 least half the incident's observed techniques, with at least two in common.
 
+**Disagreeing with the Analyzer:** `incident_commander_agent.request_reanalysis()`
+(`POST /incidents/{id}/reanalyze`) recomputes a `ThreatAnalysis` with a
+required reason and an optional rating floor that can only raise the rating,
+never lower it. Capped at one retry per incident (a second attempt is a
+409) — the intent is a bounded escalation path a human uses when they
+believe a case is under-scored, not an automated back-and-forth. Both the
+prior and resulting assessment are recorded in a `CommanderReanalysisRequest`
+(`GET /reanalysis-requests`) for audit.
+
 ### Response sub-agents (IRP annexes)
 
 Two dispatch tiers, both persisting `ResponseTask` rows (recommendations —
@@ -172,6 +189,14 @@ trigger execution:
 
 The dashboard renders inline Approve/Reject buttons on incidents awaiting a
 decision. `GET /containment-approvals?status=pending` is the analyst inbox.
+
+**Neither outcome is a dead end.** A rejection, or an approval that turns out
+to match no SOAR playbook (containment wasn't actually possible), is fed back
+to `incident_commander_agent.handle_containment_outcome()`, which replaces
+the stale decision with the next response tier down (today, always
+`ESCALATE` — terminal, since escalation files no approval of its own to
+reject or fail). Both the outcome and the fallback decision are recorded in
+a `CommanderContainmentReview` (`GET /containment-reviews`).
 
 ### Evidence collection & preservation
 

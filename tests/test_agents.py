@@ -1,15 +1,22 @@
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.agents import incident_commander_agent, incident_response_agent
+from app.agents.incident_commander_agent import ReanalysisAlreadyRequested
+from app.agents.threat_analyzer_agent import threat_analyzer_agent
 from app.agents.threat_intel_agent import threat_intel_agent
 from app.models import (
     Alert,
     AlertSeverity,
     ApprovalStatus,
     Asset,
+    CommanderDecision,
+    CommanderReanalysisRequest,
     ContainmentApproval,
     Exposure,
     Incident,
+    IncidentTriage,
     PlaybookExecution,
     ResponseDecision,
     ThreatActorProfile,
@@ -131,3 +138,74 @@ def test_reasoning_mode_falls_back_to_deterministic_without_api_key(db_session, 
     triage = incident_response_agent.triage(db_session, incident)
 
     assert triage.reasoning_mode == "deterministic"
+
+
+def test_commander_reanalysis_floor_raises_rating_but_never_lowers_it(db_session):
+    ws = _asset(db_session, "ws-01", criticality=2, exposure=Exposure.INTERNAL)
+    alert = _alert(db_session, ws, "minor alert", AlertSeverity.LOW, "T1110")
+    incident = _incident(db_session, ws, [alert], severity=AlertSeverity.LOW, confidence=0.1)
+
+    baseline = threat_analyzer_agent.analyze(db_session, incident)
+    assert baseline.risk_rating == "low"
+    assert not baseline.recommended
+
+    # A floor below the computed rating is a no-op -- it can only raise.
+    same = threat_analyzer_agent.analyze(db_session, incident, override_floor=AlertSeverity.LOW)
+    assert same.risk_rating == "low"
+
+    raised = incident_commander_agent.request_reanalysis(
+        db_session, incident, reason="analyst believes this is understated", override_floor=AlertSeverity.HIGH
+    )
+    assert raised.risk_rating == "high"
+    assert raised.recommended
+
+    record = db_session.query(CommanderReanalysisRequest).filter_by(incident_id=incident.id).one()
+    assert record.prior_risk_rating == AlertSeverity.LOW
+    assert not record.prior_recommended
+    assert record.new_risk_rating == AlertSeverity.HIGH
+    assert record.new_recommended
+
+
+def test_commander_reanalysis_is_capped_at_one_retry(db_session):
+    ws = _asset(db_session, "ws-01")
+    alert = _alert(db_session, ws, "minor alert", AlertSeverity.LOW, "T1110")
+    incident = _incident(db_session, ws, [alert], severity=AlertSeverity.LOW, confidence=0.1)
+    threat_analyzer_agent.analyze(db_session, incident)
+
+    incident_commander_agent.request_reanalysis(
+        db_session, incident, reason="first disagreement", override_floor=AlertSeverity.HIGH
+    )
+
+    with pytest.raises(ReanalysisAlreadyRequested):
+        incident_commander_agent.request_reanalysis(
+            db_session, incident, reason="second disagreement", override_floor=AlertSeverity.CRITICAL
+        )
+
+
+def test_commander_reanalysis_reroutes_a_previously_skipped_incident_into_triage(db_session):
+    """Mirrors what routes.reanalyze_incident does at the agent layer: a
+    skip()-ped incident whose reanalysis now recommends it gets its stale
+    MONITOR decision replaced by a full triage() + decide() pass."""
+    ws = _asset(db_session, "ws-01", criticality=2, exposure=Exposure.INTERNAL)
+    alert = _alert(db_session, ws, "minor alert", AlertSeverity.LOW, "T1110")
+    incident = _incident(db_session, ws, [alert], severity=AlertSeverity.LOW, confidence=0.1)
+
+    risk_assessment = incident_commander_agent.gate(db_session, incident)
+    assert not risk_assessment.recommended
+    incident_commander_agent.skip(db_session, incident, risk_assessment)
+    assert db_session.query(CommanderDecision).filter_by(incident_id=incident.id).one().decision == ResponseDecision.MONITOR
+
+    raised = incident_commander_agent.request_reanalysis(
+        db_session, incident, reason="analyst override", override_floor=AlertSeverity.HIGH
+    )
+    assert raised.recommended
+    assert db_session.query(IncidentTriage).filter_by(incident_id=incident.id).one_or_none() is None
+
+    stale = db_session.query(CommanderDecision).filter_by(incident_id=incident.id).one()
+    db_session.delete(stale)
+    db_session.commit()
+    triage = incident_response_agent.triage(db_session, incident, raised)
+    decision = incident_commander_agent.decide(db_session, incident, triage)
+
+    assert triage.criticality == "high"
+    assert decision.decision == ResponseDecision.ESCALATE

@@ -47,6 +47,13 @@ _CRITICALITY_THRESHOLDS = [
 # heuristics. This is now a single weighted judgment instead.
 _RECOMMEND_AT = (AlertSeverity.HIGH, AlertSeverity.CRITICAL)
 
+# Ordinal ranking used only to compare a Commander-supplied override floor
+# against the computed rating -- a floor can only raise the rating, never
+# suppress it. A human commander escalating a case they believe is
+# under-scored is a safe operation; letting an override silently downgrade
+# a legitimately high finding is not, so that direction isn't supported.
+_RATING_ORDER = [AlertSeverity.LOW, AlertSeverity.MEDIUM, AlertSeverity.HIGH, AlertSeverity.CRITICAL]
+
 
 def _bucket(score: float) -> AlertSeverity:
     for threshold, level in _CRITICALITY_THRESHOLDS:
@@ -91,7 +98,19 @@ def _rationale(incident: Incident, inventory, vuln_mgmt, threat_intel, rating: A
 
 
 class ThreatAnalyzerAgent:
-    def analyze(self, db: Session, incident: Incident) -> RiskAssessment:
+    def analyze(
+        self,
+        db: Session,
+        incident: Incident,
+        override_floor: AlertSeverity | None = None,
+        override_reason: str | None = None,
+    ) -> RiskAssessment:
+        """Computes the deterministic risk assessment. `override_floor` is
+        set only when the Commander is requesting re-analysis
+        (incident_commander_agent.request_reanalysis()): if the computed
+        rating is below the floor, the rating is raised to it and
+        `recommended` is re-derived from the raised rating -- the floor
+        never lowers a rating the deterministic formula produced."""
         asset_ids = list({a.asset_id for a in incident.alerts})
 
         inventory = inventory_agent.get_context(db, asset_ids)
@@ -100,17 +119,27 @@ class ThreatAnalyzerAgent:
 
         score = _score(incident, inventory, vuln_mgmt, threat_intel)
         rating = _bucket(score)
+
+        overridden = override_floor is not None and _RATING_ORDER.index(override_floor) > _RATING_ORDER.index(rating)
+        if overridden:
+            rating = override_floor
+
         recommended = rating in _RECOMMEND_AT
         rationale = _rationale(incident, inventory, vuln_mgmt, threat_intel, rating, score, recommended)
+        if overridden:
+            rationale += f" Commander override: raised to {rating.value.upper()} -- {override_reason}"
 
         analysis = db.query(ThreatAnalysis).filter_by(incident_id=incident.id).one_or_none()
         if analysis is None:
             analysis = ThreatAnalysis(incident_id=incident.id)
             db.add(analysis)
+        elif overridden:
+            analysis.revision += 1
         analysis.risk_score = score
         analysis.risk_rating = rating
         analysis.recommended = recommended
         analysis.rationale = rationale
+        analysis.override_reason = override_reason if overridden else analysis.override_reason
         db.commit()
 
         return RiskAssessment(

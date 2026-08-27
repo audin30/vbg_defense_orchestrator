@@ -253,6 +253,42 @@ class ThreatAnalysis(Base):
     recommended: Mapped[bool] = mapped_column(Boolean, default=False)  # cleared the gate into full triage
     risk_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 1 = highest risk this batch
     rationale: Mapped[str] = mapped_column(Text)
+    # 1 = the original automated pass. Bumped each time the Commander
+    # requests re-analysis (see CommanderReanalysisRequest); capped at one
+    # retry by incident_commander_agent.request_reanalysis().
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    # Set only on a revision produced by request_reanalysis() -- the
+    # Commander's stated reason for disagreeing with the prior assessment.
+    override_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    incident: Mapped["Incident"] = relationship()
+
+
+class CommanderReanalysisRequest(Base):
+    """Audit trail for a Commander-initiated disagreement: a human incident
+    commander (or the Commander agent acting on their behalf) believed the
+    Threat Analyzer's assessment under- or over-stated the risk, and asked
+    for it to be recomputed with a stated reason and, optionally, a risk
+    rating floor. Capped at one request per incident by
+    incident_commander_agent.request_reanalysis() -- this is a bounded
+    escalation path, not an open-ended agent argument loop. Both the prior
+    and resulting assessment are snapshotted here so the disagreement and
+    its outcome stay auditable even though ThreatAnalysis itself only keeps
+    the current row."""
+
+    __tablename__ = "commander_reanalysis_requests"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    incident_id: Mapped[str] = mapped_column(ForeignKey("incidents.id"))
+    reason: Mapped[str] = mapped_column(Text)
+    requested_floor: Mapped[AlertSeverity | None] = mapped_column(Enum(AlertSeverity), nullable=True)
+    prior_risk_score: Mapped[float] = mapped_column(Float)
+    prior_risk_rating: Mapped[AlertSeverity] = mapped_column(Enum(AlertSeverity))
+    prior_recommended: Mapped[bool] = mapped_column(Boolean)
+    new_risk_score: Mapped[float] = mapped_column(Float)
+    new_risk_rating: Mapped[AlertSeverity] = mapped_column(Enum(AlertSeverity))
+    new_recommended: Mapped[bool] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     incident: Mapped["Incident"] = relationship()
@@ -372,7 +408,10 @@ class ContainmentApproval(Base):
 
 class CommanderDecision(Base):
     """The Incident Commander Agent's final call on an incident, made from
-    the IR Agent's triage report."""
+    the IR Agent's triage report. One per incident -- superseded (deleted,
+    then replaced) rather than versioned, by both the reanalysis path
+    (incident_commander_agent.request_reanalysis()) and the containment
+    feedback loop (incident_commander_agent.handle_containment_outcome())."""
 
     __tablename__ = "commander_decisions"
 
@@ -381,6 +420,34 @@ class CommanderDecision(Base):
     decision: Mapped[ResponseDecision] = mapped_column(Enum(ResponseDecision))
     summary: Mapped[str] = mapped_column(Text)
     reasoning_mode: Mapped[ReasoningMode] = mapped_column(Enum(ReasoningMode))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    incident: Mapped["Incident"] = relationship()
+
+
+class ContainmentOutcome(str, enum.Enum):
+    REJECTED = "rejected"  # a human explicitly rejected the containment request
+    NO_PLAYBOOK_MATCH = "no_playbook_match"  # approved, but no SOAR playbook matched -- containment wasn't possible
+
+
+class CommanderContainmentReview(Base):
+    """Audit trail for the containment feedback loop: HITL rejected a
+    ContainmentApproval, or approved one that turned out to match no SOAR
+    playbook (containment wasn't actually possible). Either way,
+    incident_commander_agent.handle_containment_outcome() is called to pick
+    the next response tier -- today that's always a fallback from
+    CONTAIN_PENDING_APPROVAL to ESCALATE, which is terminal (no further
+    approval gate, so this can't loop)."""
+
+    __tablename__ = "commander_containment_reviews"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    incident_id: Mapped[str] = mapped_column(ForeignKey("incidents.id"))
+    approval_id: Mapped[str] = mapped_column(ForeignKey("containment_approvals.id"))
+    outcome: Mapped[ContainmentOutcome] = mapped_column(Enum(ContainmentOutcome))
+    note: Mapped[str] = mapped_column(Text, default="")
+    prior_decision: Mapped[ResponseDecision] = mapped_column(Enum(ResponseDecision))
+    new_decision: Mapped[ResponseDecision] = mapped_column(Enum(ResponseDecision))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     incident: Mapped["Incident"] = relationship()

@@ -6,12 +6,26 @@ which SOAR playbooks would run. This service is the only path from that
 request to actual execution: a human approves (playbooks run, incident
 marked contained) or rejects (nothing runs). Both outcomes record who
 decided, when, and why -- the audit trail is the point.
+
+Neither outcome is a dead end, though: a rejection, or an approval that
+turns out to match no SOAR playbook (containment wasn't actually possible),
+is fed straight back to incident_commander_agent.handle_containment_outcome()
+so the incident falls back to the next response tier (ESCALATE) instead of
+sitting on a containment request that was never going to execute.
 """
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.models import ApprovalStatus, ContainmentApproval, Incident, IncidentStatus, PlaybookExecution
+from app.agents import incident_commander_agent
+from app.models import (
+    ApprovalStatus,
+    ContainmentApproval,
+    ContainmentOutcome,
+    Incident,
+    IncidentStatus,
+    PlaybookExecution,
+)
 from app.services import soar_engine
 
 
@@ -44,6 +58,16 @@ def approve_containment(
     if executions:
         incident.status = IncidentStatus.CONTAINED
     db.commit()
+
+    if not executions:
+        # Approved, but nothing actually matched -- containment isn't
+        # possible for this incident as currently understood. Send it back
+        # to the Commander to fall back to the next response tier rather
+        # than leaving it "approved" with no effect.
+        incident_commander_agent.handle_containment_outcome(
+            db, incident, approval, ContainmentOutcome.NO_PLAYBOOK_MATCH, note
+        )
+
     return approval, executions
 
 
@@ -54,4 +78,10 @@ def reject_containment(db: Session, approval_id: str, approver: str, note: str =
     approval.decided_by = approver
     approval.decision_note = note
     db.commit()
+
+    incident = db.get(Incident, approval.incident_id)
+    incident_commander_agent.handle_containment_outcome(
+        db, incident, approval, ContainmentOutcome.REJECTED, note
+    )
+
     return approval

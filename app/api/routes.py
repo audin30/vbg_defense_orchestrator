@@ -2,13 +2,18 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.agents import incident_commander_agent, incident_response_agent
+from app.agents.incident_commander_agent import ReanalysisAlreadyRequested
 from app.bootstrap import run_bootstrap
 from app.db import get_db
 from app.models import (
     Alert,
+    AlertSeverity,
     ApprovalStatus,
     Asset,
+    CommanderContainmentReview,
     CommanderDecision,
+    CommanderReanalysisRequest,
     ContainmentApproval,
     DetectionRule,
     EvidenceItem,
@@ -139,6 +144,35 @@ def _threat_analysis_dict(t: ThreatAnalysis | None) -> dict | None:
         "risk_rank": t.risk_rank,
         "rationale": t.rationale,
         "created_at": t.created_at.isoformat(),
+    }
+
+
+def _reanalysis_dict(r: CommanderReanalysisRequest) -> dict:
+    return {
+        "id": r.id,
+        "incident_id": r.incident_id,
+        "reason": r.reason,
+        "requested_floor": r.requested_floor.value if r.requested_floor else None,
+        "prior_risk_score": r.prior_risk_score,
+        "prior_risk_rating": r.prior_risk_rating.value,
+        "prior_recommended": r.prior_recommended,
+        "new_risk_score": r.new_risk_score,
+        "new_risk_rating": r.new_risk_rating.value,
+        "new_recommended": r.new_recommended,
+        "created_at": r.created_at.isoformat(),
+    }
+
+
+def _containment_review_dict(r: CommanderContainmentReview) -> dict:
+    return {
+        "id": r.id,
+        "incident_id": r.incident_id,
+        "approval_id": r.approval_id,
+        "outcome": r.outcome.value,
+        "note": r.note,
+        "prior_decision": r.prior_decision.value,
+        "new_decision": r.new_decision.value,
+        "created_at": r.created_at.isoformat(),
     }
 
 
@@ -350,6 +384,66 @@ def list_threat_analyses(recommended_only: bool = False, db: Session = Depends(g
     return [
         {"incident_id": a.incident_id, **_threat_analysis_dict(a)}
         for a in analyses
+    ]
+
+
+class ReanalysisRequest(BaseModel):
+    reason: str
+    override_floor: str | None = None  # AlertSeverity value; raises the rating, never lowers it
+
+
+@router.get("/reanalysis-requests")
+def list_reanalysis_requests(db: Session = Depends(get_db)):
+    """Audit trail of Commander disagreements with the Threat Analyzer."""
+    return [
+        _reanalysis_dict(r)
+        for r in db.query(CommanderReanalysisRequest).order_by(CommanderReanalysisRequest.created_at.desc()).all()
+    ]
+
+
+@router.post("/incidents/{incident_id}/reanalyze")
+def reanalyze_incident(incident_id: str, body: ReanalysisRequest, db: Session = Depends(get_db)):
+    """The Commander's disagreement path: recompute the Threat Analyzer's
+    assessment with a stated reason and, optionally, a rating floor (which
+    can only raise the rating, never suppress it). Capped at one request
+    per incident. If the new assessment now recommends an incident that had
+    previously been skipped, this runs it through full triage + a Commander
+    decision immediately, replacing the prior MONITOR/skip decision."""
+    incident = db.get(Incident, incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    override_floor = AlertSeverity(body.override_floor) if body.override_floor else None
+    try:
+        risk_assessment = incident_commander_agent.request_reanalysis(
+            db, incident, body.reason, override_floor
+        )
+    except ReanalysisAlreadyRequested as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    existing_triage = db.query(IncidentTriage).filter_by(incident_id=incident.id).one_or_none()
+    if risk_assessment.recommended and existing_triage is None:
+        # Was previously skipped straight to MONITOR; the disagreement
+        # flipped it into scope, so run the pipeline it should have gone
+        # through the first time.
+        stale_decision = db.query(CommanderDecision).filter_by(incident_id=incident.id).one_or_none()
+        if stale_decision is not None:
+            db.delete(stale_decision)
+            db.commit()
+        triage = incident_response_agent.triage(db, incident, risk_assessment)
+        incident_commander_agent.decide(db, incident, triage)
+
+    return _incident_dict(incident, db)
+
+
+@router.get("/containment-reviews")
+def list_containment_reviews(db: Session = Depends(get_db)):
+    """Audit trail of the containment feedback loop -- rejected approvals,
+    or approvals that matched no SOAR playbook, and the fallback decision
+    the Commander made in response."""
+    return [
+        _containment_review_dict(r)
+        for r in db.query(CommanderContainmentReview).order_by(CommanderContainmentReview.created_at.desc()).all()
     ]
 
 

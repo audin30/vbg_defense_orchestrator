@@ -184,6 +184,33 @@ contract (`app/agents/context.py` dataclasses — `AssetFinding`,
   executes yet), `high → ESCALATE` (notify only), `medium`/`low → MONITOR`
   (no action). Persists a `CommanderDecision` row.
 
+### Commander disagreement — bounded re-analysis, not a loop
+
+`incident_commander_agent.request_reanalysis(db, incident, reason, override_floor=None)`
+is how a human commander who disagrees with the Threat Analyzer's assessment
+sends it back, exposed as `POST /incidents/{id}/reanalyze` (`reason` required,
+`override_floor` an optional `AlertSeverity` value). Two deliberate
+constraints keep this from becoming an open-ended agent argument:
+
+- **One retry per incident.** `ThreatAnalysis.revision` starts at 1 and is
+  bumped only when an override actually changes the rating; a second
+  `request_reanalysis()` call raises `ReanalysisAlreadyRequested` (409 at the
+  API) rather than looping — the correct next step is a human decision, not
+  another automated pass.
+- **A floor can only raise the rating, never lower it**
+  (`threat_analyzer_agent._RATING_ORDER`) — escalating a case a human
+  believes is under-scored is safe; letting an override silently suppress a
+  legitimately high finding is not, so that direction isn't supported at all.
+
+Both the prior and resulting assessment are snapshotted into a
+`CommanderReanalysisRequest` row (`GET /reanalysis-requests` lists the audit
+trail) — `ThreatAnalysis` itself still holds only the current row. If the
+re-analysis flips `recommended` from `False` to `True` (the only direction
+possible), `POST /incidents/{id}/reanalyze` deletes the stale `MONITOR`
+`CommanderDecision` from `skip()` and immediately runs the incident through
+`incident_response_agent.triage()` + `incident_commander_agent.decide()`, the
+same routing `bootstrap.py` does on the first pass.
+
 ### Human-in-the-loop containment approval
 
 **Remediation is never automatic.** The Commander cannot execute SOAR
@@ -200,6 +227,20 @@ why. Exposed via `GET /containment-approvals` (analyst inbox — filter
 (dashboard renders inline Approve/Reject buttons on `CONTAIN_PENDING_APPROVAL`
 incidents). **This is the only place SOAR playbooks get triggered** —
 nothing executes automated response outside an explicit human approval.
+
+**Containment feedback loop.** Neither HITL outcome is a dead end. Both
+`approve_containment()` (when `soar_engine.evaluate_and_execute()` returns no
+executions — approved, but nothing actually matched) and
+`reject_containment()` call
+`incident_commander_agent.handle_containment_outcome(db, incident, approval, outcome, note)`
+straight after recording the approval decision. It deletes the stale
+`CONTAIN_PENDING_APPROVAL` `CommanderDecision` and replaces it with the next
+tier down (`_FALLBACK_DECISION`, today always `ESCALATE`), so the incident
+doesn't sit on a containment request that was never going to execute. This
+is terminal, not a loop — `ESCALATE` files no approval of its own, so there's
+nothing further to reject or fail. Both the rejected/failed outcome and the
+resulting decision are recorded in a `CommanderContainmentReview` row
+(`GET /containment-reviews`).
 
 ### Response sub-agents (IRP annexes)
 

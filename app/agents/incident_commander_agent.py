@@ -20,6 +20,22 @@ Threat Analyzer and IR Agent:
     critical  -> CONTAIN_PENDING_APPROVAL (file containment request, wait for a human)
     high      -> ESCALATE                 (page on-call, file ticket, wait for a human)
     medium/low -> MONITOR                 (no action, just recorded)
+
+- `request_reanalysis()` is the disagreement path: a human commander who
+  believes the Analyzer under-rated an incident can ask for it to be
+  recomputed with a stated reason and an optional risk-rating floor. It is
+  a bounded escalation, not a loop -- one retry per incident, and the floor
+  can only raise the rating, never suppress it (see threat_analyzer_agent's
+  `_RATING_ORDER` comment). Both the prior and resulting assessment are
+  recorded in a CommanderReanalysisRequest row for audit.
+- `handle_containment_outcome()` is the other feedback loop: HITL rejected a
+  ContainmentApproval, or approved one that turned out to match no SOAR
+  playbook (services/approval_service.py calls this in both cases). The
+  Commander falls back to the next response tier down from
+  CONTAIN_PENDING_APPROVAL -- ESCALATE -- rather than leaving the incident
+  stuck on a request that isn't going to execute. This is terminal, not a
+  loop: ESCALATE files no approval of its own, so there's nothing further to
+  reject or fail.
 """
 from sqlalchemy.orm import Session
 
@@ -28,20 +44,48 @@ from app.agents.context import RiskAssessment, TriageReport
 from app.agents.response.aws import dispatch_aws_playbooks
 from app.agents.threat_analyzer_agent import threat_analyzer_agent
 from app.models import (
+    AlertSeverity,
+    CommanderContainmentReview,
     CommanderDecision,
+    CommanderReanalysisRequest,
     ContainmentApproval,
+    ContainmentOutcome,
     Incident,
     ReasoningMode,
     ResponseDecision,
     ResponseTask,
+    ThreatAnalysis,
 )
 from app.services import soar_engine
+
+
+class ReanalysisAlreadyRequested(Exception):
+    """Raised when an incident has already used its one re-analysis retry."""
+
+
+class NoFallbackAvailable(Exception):
+    """Raised if handle_containment_outcome() is asked to review a decision
+    that has no next tier to fall back to (only CONTAIN_PENDING_APPROVAL
+    does today)."""
 
 _DECISION_BY_CRITICALITY = {
     "critical": ResponseDecision.CONTAIN_PENDING_APPROVAL,
     "high": ResponseDecision.ESCALATE,
     "medium": ResponseDecision.MONITOR,
     "low": ResponseDecision.MONITOR,
+}
+
+# The next response tier down when the current one can't proceed. Only
+# CONTAIN_PENDING_APPROVAL has anywhere to fall back to -- ESCALATE and
+# MONITOR don't file an approval in the first place, so there's nothing for
+# HITL to reject or fail on them.
+_FALLBACK_DECISION = {
+    ResponseDecision.CONTAIN_PENDING_APPROVAL: ResponseDecision.ESCALATE,
+}
+
+_OUTCOME_REASON = {
+    ContainmentOutcome.REJECTED: "the containment request was rejected by human review",
+    ContainmentOutcome.NO_PLAYBOOK_MATCH: "approval was granted, but no SOAR playbook matched this incident -- containment wasn't actually possible",
 }
 
 
@@ -81,6 +125,121 @@ class IncidentCommanderAgent:
         db.add(commander_decision)
         db.commit()
         return commander_decision
+
+    def request_reanalysis(
+        self,
+        db: Session,
+        incident: Incident,
+        reason: str,
+        override_floor: AlertSeverity | None = None,
+    ) -> RiskAssessment:
+        """A human commander disagrees with the current ThreatAnalysis and
+        wants it recomputed. `reason` is required and stored for audit;
+        `override_floor`, if given, raises the resulting rating to at least
+        that level (never lowers it -- see threat_analyzer_agent). Capped
+        at one request per incident: a second call raises
+        ReanalysisAlreadyRequested rather than looping. Callers should
+        re-run the recommended/skip routing (triage() or skip()) against
+        the returned RiskAssessment, since `.recommended` may have flipped.
+        """
+        prior = db.query(ThreatAnalysis).filter_by(incident_id=incident.id).one_or_none()
+        if prior is not None and prior.revision > 1:
+            raise ReanalysisAlreadyRequested(
+                f"Incident {incident.id} was already re-analyzed once (revision {prior.revision}); "
+                "escalate to a human decision instead of requesting another automated pass."
+            )
+        prior_score = prior.risk_score if prior else 0.0
+        prior_rating = prior.risk_rating if prior else AlertSeverity.LOW
+        prior_recommended = prior.recommended if prior else False
+
+        risk_assessment = threat_analyzer_agent.analyze(
+            db, incident, override_floor=override_floor, override_reason=reason
+        )
+
+        db.add(
+            CommanderReanalysisRequest(
+                incident_id=incident.id,
+                reason=reason,
+                requested_floor=override_floor,
+                prior_risk_score=prior_score,
+                prior_risk_rating=prior_rating,
+                prior_recommended=prior_recommended,
+                new_risk_score=risk_assessment.risk_score,
+                new_risk_rating=AlertSeverity(risk_assessment.risk_rating),
+                new_recommended=risk_assessment.recommended,
+            )
+        )
+        db.commit()
+        return risk_assessment
+
+    def handle_containment_outcome(
+        self,
+        db: Session,
+        incident: Incident,
+        approval: ContainmentApproval,
+        outcome: ContainmentOutcome,
+        note: str = "",
+    ) -> CommanderDecision:
+        """Containment didn't happen -- HITL rejected it, or approved it but
+        no playbook matched. Replaces the stale CONTAIN_PENDING_APPROVAL
+        CommanderDecision with the next tier down (today, always ESCALATE)
+        and logs a CommanderContainmentReview for audit. Raises
+        NoFallbackAvailable if called against a decision with no fallback
+        (shouldn't happen in practice -- only CONTAIN_PENDING_APPROVAL files
+        an approval at all)."""
+        prior_decision = db.query(CommanderDecision).filter_by(incident_id=incident.id).one_or_none()
+        prior_response = prior_decision.decision if prior_decision else ResponseDecision.CONTAIN_PENDING_APPROVAL
+        fallback = _FALLBACK_DECISION.get(prior_response)
+        if fallback is None:
+            raise NoFallbackAvailable(
+                f"No fallback response tier defined for {prior_response.value} on incident {incident.id}"
+            )
+
+        deterministic_text = (
+            f"{incident.title} — containment did not proceed because {_OUTCOME_REASON[outcome]}"
+            f"{f' ({note})' if note else ''}. Falling back to {fallback.value.upper()}: "
+            "escalated to on-call for manual response."
+        )
+        summary, mode = llm_reasoning.reason(
+            system_prompt=(
+                "You are the Incident Commander in a security operations center. A containment "
+                "request you filed did not go through as planned. Write a brief (2-4 sentence) "
+                "executive summary explaining why, and what response tier the incident is falling "
+                "back to instead."
+            ),
+            user_prompt=(
+                f"Incident: {incident.title}\n"
+                f"Original decision: {prior_response.value}\n"
+                f"Why containment didn't proceed: {_OUTCOME_REASON[outcome]}\n"
+                f"Reviewer note: {note or 'none'}\n"
+                f"Fallback response tier: {fallback.value}\n"
+            ),
+            fallback_text=deterministic_text,
+            model=llm_reasoning.COMMANDER_MODEL,
+        )
+
+        if prior_decision is not None:
+            db.delete(prior_decision)
+            db.flush()
+        new_decision = CommanderDecision(
+            incident_id=incident.id,
+            decision=fallback,
+            summary=summary,
+            reasoning_mode=ReasoningMode(mode),
+        )
+        db.add(new_decision)
+        db.add(
+            CommanderContainmentReview(
+                incident_id=incident.id,
+                approval_id=approval.id,
+                outcome=outcome,
+                note=note,
+                prior_decision=prior_response,
+                new_decision=fallback,
+            )
+        )
+        db.commit()
+        return new_decision
 
     def decide(self, db: Session, incident: Incident, triage: TriageReport) -> CommanderDecision:
         decision = _DECISION_BY_CRITICALITY[triage.criticality]
