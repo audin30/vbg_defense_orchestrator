@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.git/
+.github/
+tests/
+playbooks/
+data/
+orchestrator.db
+*.md
+.claude/

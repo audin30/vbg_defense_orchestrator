@@ -1,0 +1,232 @@
+# VBG Defense Orchestrator
+
+A defense orchestrator combining SIEM alert correlation, MITRE ATT&CK-mapped
+detection coverage, asset-weighted vulnerability prioritization, and a
+multi-agent SOAR triage/response pipeline with human-in-the-loop containment
+approval. Backend is FastAPI + SQLAlchemy (SQLite or Postgres), frontend is a
+single static HTML/vanilla-JS dashboard with no build step, served by FastAPI
+itself.
+
+SIEM, vulnerability scanner, asset inventory, and IOC/TIP feeds are mocked
+with a deliberately coherent synthetic attack scenario. The CISA KEV catalog
+and MITRE ATT&CK Enterprise dataset are ingested live from their public
+sources, with graceful offline fallback.
+
+## Quick start
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+
+# Seed reference data, ingest sources, correlate incidents, run the agent pipeline
+.venv/bin/python -m app.bootstrap
+
+# Run the dev server
+.venv/bin/uvicorn app.main:app --reload
+```
+
+Open **http://127.0.0.1:8000/** for the dashboard. The "Run Ingestion + Refresh"
+button re-runs bootstrap (idempotent) and reloads.
+
+Run the tests:
+
+```bash
+.venv/bin/python -m pytest tests/ -v
+```
+
+The SQLite DB file is `orchestrator.db` at the repo root, created on first
+bootstrap. Delete it to reset all state.
+
+## What it does
+
+- **Ingests** alerts, vulnerabilities, and assets from pluggable connectors
+  (mocked today; see [Connectors](#connectors-mock-to-real)).
+- **Correlates** related alerts into incidents — per-asset clustering by time
+  window, then chained across assets when a lateral-movement technique
+  bridges them.
+- **Triages** each incident through a five-agent pipeline that gathers asset
+  context, open vulnerabilities (KEV-prioritized), and threat intel matches
+  (IOC hits + ATT&CK TTP overlap against tracked actor profiles), then
+  computes a deterministic weighted criticality score.
+- **Plans evidence collection** — every recommended artifact is traceable to
+  either the ATT&CK technique observed or a confirmed IOC match.
+- **Spawns response runbooks** — IRP-category sub-agents (malware,
+  ransomware, phishing, credential compromise, lateral movement, data
+  exfiltration) at triage time, and a second tier of AWS IRP playbook
+  sub-agents (credential compromise, ransomware, data access, DoS, insider
+  threat, and more) once the Commander escalates or queues containment.
+- **Gates all remediation behind human approval.** The Incident Commander
+  never executes containment automatically — a critical incident files a
+  containment request previewing exactly which SOAR playbooks would run;
+  nothing executes until an analyst approves it via the dashboard or API.
+- **Maps detection coverage** against MITRE ATT&CK and prioritizes
+  vulnerabilities by asset criticality and exposure (this last piece —
+  `compute_risk_score()` — is an intentionally unimplemented placeholder;
+  see below).
+
+## Architecture
+
+### Connector abstraction (mock-to-real seam)
+
+`app/connectors/base.py` defines abstract interfaces for every external data
+source: SIEM, vulnerability scanner, asset inventory, threat intel, KEV
+catalog, ATT&CK catalog, and IOC enrichment. Every service in the app talks
+only to these interfaces, never to a concrete product. `app/connectors/mock.py`
+implements the still-mocked ones against synthetic data; `app/connectors/__init__.py`
+is the single wiring point deciding which concrete connector backs each
+interface. To add a real integration (Splunk, Qualys, CrowdStrike, a TIP),
+implement the matching base class in a new `app/connectors/<product>.py` and
+change the import — nothing else in the app changes.
+
+Two connectors are **live** rather than mocked:
+
+- **CISA KEV** (`cisa_kev.py`) — the public Known Exploited Vulnerabilities
+  feed, cached 24h locally. Corrects `Vulnerability.kev_listed` after
+  ingestion (the catalog, not the scanner, is the source of truth) and
+  surfaces remediation due dates + ransomware-campaign attribution.
+- **MITRE ATT&CK** (`mitre_attack.py`) — the official Enterprise STIX bundle,
+  cached 7 days. Feeds ~700 techniques (sub-techniques included) and ~160
+  real intrusion-set actor groups, alongside the mock TIP profiles.
+
+Both degrade gracefully offline: serve a stale cache on fetch failure, or
+fall back to the curated seed / scanner-provided flags with no cache at all.
+
+VirusTotal has a defined seam (`IocEnrichmentConnector`) but no
+implementation yet — see [Known incomplete pieces](#known-incomplete-pieces).
+
+### Agent pipeline
+
+Five agents in `app/agents/`, each wrapping services behind a typed contract
+(`app/agents/context.py`) rather than raw ORM rows:
+
+| Agent | Role |
+|---|---|
+| Inventory | Asset criticality/exposure/business-unit context |
+| Vulnerability Management | Open findings on affected assets, KEV-first |
+| Threat Intel | IOC matches + ATT&CK technique-overlap actor matching |
+| **Incident Response** | Hub — synthesizes the three above, scores criticality, builds the evidence plan, spawns IRP response sub-agents |
+| **Incident Commander** | Gates response by criticality; the only place SOAR playbooks get triggered — and only after human approval |
+
+Actor matching uses **incident coverage**, not Jaccard similarity — a real
+intrusion set with hundreds of known techniques would otherwise never
+register against a small incident. A match requires the actor to cover at
+least half the incident's observed techniques, with at least two in common.
+
+### Response sub-agents (IRP annexes)
+
+Two dispatch tiers, both persisting `ResponseTask` rows (recommendations —
+never auto-executed):
+
+1. **Triage-stage** (`app/agents/response/`) — six category sub-agents
+   (malware, ransomware, phishing, credential compromise, lateral movement,
+   data exfiltration), spawned by the IR Agent based on observed ATT&CK
+   technique IDs.
+2. **Commander-stage** (`app/agents/response/aws/`) — ten sub-agents
+   distilled from the AWS incident response playbook set (credential
+   compromise, STS token abuse, ransomware, data access, personal data
+   breach, DoS, insider threat, Identity Center compromise, federated access
+   abuse, satellite operations), triggered by GuardDuty finding types /
+   CloudTrail event names and activated only once the Commander escalates or
+   queues containment.
+
+### Human-in-the-loop containment approval
+
+Remediation is never automatic. A critical incident produces a
+`ContainmentApproval` (status `pending`) previewing which SOAR playbooks
+would run. `app/services/approval_service.py` is the only code path that can
+trigger execution:
+
+- `POST /containment-approvals/{id}/approve` — runs the matched playbooks,
+  marks the incident contained, records who approved it and why.
+- `POST /containment-approvals/{id}/reject` — executes nothing, records the
+  rejection.
+
+The dashboard renders inline Approve/Reject buttons on incidents awaiting a
+decision. `GET /containment-approvals?status=pending` is the analyst inbox.
+
+### Evidence collection & preservation
+
+`app/agents/evidence_planner.py` produces evidence recommendations traceable
+to either the ATT&CK technique observed (`TECHNIQUE_EVIDENCE_MAP`) or a
+direct threat-intel IOC match — never deduped against each other, since a
+confirmed IOC hit is independently justified for chain-of-custody purposes.
+
+### Hybrid LLM reasoning (optional)
+
+`app/agents/llm_reasoning.py` generates rationale/summary text on top of the
+already-computed deterministic decisions. If `ANTHROPIC_API_KEY` is unset or
+the API call fails, it falls back to a deterministic templated string — the
+pipeline's decisions are never gated on LLM availability.
+
+### Database
+
+SQLite by default (`orchestrator.db`, zero setup). For the full stack, point
+at Postgres:
+
+```bash
+docker compose up -d   # postgres:16 on localhost:5433
+                        # (offset from the default 5432 in case a native
+                        # Postgres install is already using it)
+DATABASE_URL=postgresql+psycopg2://orchestrator:orchestrator@localhost:5433/orchestrator \
+  .venv/bin/python -m app.bootstrap
+```
+
+`.mcp.json` configures a read-only Postgres MCP server
+(`postgres-mcp --access-mode=restricted`) against the same database, so an
+MCP-aware assistant can query the intel warehouse directly. Tests always use
+in-memory SQLite regardless of `DATABASE_URL`.
+
+### Frontend
+
+`app/static/index.html` is a single self-contained file (inline CSS/JS, no
+build step) served at `GET /`. It calls the JSON API directly via `fetch()`.
+
+## Known incomplete pieces
+
+- **`compute_risk_score()`** in `app/services/vuln_prioritization.py`
+  intentionally raises `NotImplementedError` — the asset exposure/
+  criticality-weighted risk formula is a deliberate placeholder (see the
+  function's docstring for inputs and trade-offs). Bootstrap catches this and
+  the rest of the app runs fine with `risk_score: 0.0` everywhere.
+- **Ransomware precursor heuristic** in `app/agents/response/ransomware.py` —
+  the direct T1486/T1490 triggers work today; the `matches()` override for
+  spotting a ransomware pattern *before* encryption starts (e.g. credential
+  dumping + lateral movement toward backup infrastructure) is a placeholder.
+- **VirusTotal enrichment** — `IocEnrichmentConnector` seam is defined and
+  wired to a no-op by default; no implementation yet.
+
+## The mock scenario
+
+`app/seed/mock_scenario.py` and `app/seed/mock_threat_intel.py` model one
+coherent attack chain rather than random fixtures: a public-facing web
+server gets exploited via a KEV-listed CVE, credentials are dumped, the
+attacker pivots to the domain controller via SMB, then exfiltrates data — plus
+a second, cloud-native chain (stolen instance credentials → S3 destruction →
+attacker KMS key) modeled on the AWS ransomware playbook's own game-day
+scenario. A couple of unrelated low-severity alerts are mixed in as noise.
+This exercises the full pipeline: correlation, ATT&CK coverage, threat-intel
+matching, and both response-dispatch tiers.
+
+## Commands reference
+
+```bash
+# Run a single test
+.venv/bin/python -m pytest tests/test_correlation_service.py::test_lateral_movement_chains_two_assets_into_one_incident -v
+
+# Re-bootstrap (idempotent for reference data; see DEPLOYMENT.md for a note
+# on alert/incident dedup across process restarts in the mock scenario)
+.venv/bin/python -m app.bootstrap
+```
+
+There is no linter/formatter configured in this repo yet.
+
+## Deploying this
+
+See [`DEPLOYMENT.md`](DEPLOYMENT.md) for the container image, environment
+variables, Postgres setup, and production considerations (auth is not
+included — put this behind something that handles it).
+
+## For contributors using Claude Code
+
+See [`CLAUDE.md`](CLAUDE.md) for the full architectural deep-dive this README
+summarizes, plus conventions for the codebase.
