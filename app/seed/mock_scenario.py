@@ -9,7 +9,10 @@ realistic to operate on.
 """
 from datetime import datetime, timedelta, timezone
 
-_NOW = datetime.now(timezone.utc)
+# Fixed, not datetime.now(): ingest_alerts() dedupes by (title, asset_id,
+# occurred_at), so a wall-clock anchor makes every fresh process compute
+# different timestamps and produce duplicate alerts/incidents on re-bootstrap.
+_NOW = datetime(2026, 8, 25, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def _t(minutes_ago: int) -> str:

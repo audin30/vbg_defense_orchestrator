@@ -186,23 +186,18 @@ against SQLite-free local dev).
 tables if missing, seed ATT&CK/detection-rule/playbook reference data,
 ingest all connectors (mock + live KEV/MITRE), correlate alerts into
 incidents, and run the two-tier response pipeline. It's meant to be
-re-run — most of it is idempotent by natural key (hostnames, CVE+asset,
-indicator value, ATT&CK technique ID).
+re-run, including across process restarts — everything is idempotent by
+natural key (hostnames, CVE+asset, indicator value, ATT&CK technique ID,
+and — since the mock SIEM data's `occurred_at` timestamps are anchored to a
+fixed constant in `app/seed/mock_scenario.py`, not `datetime.now()` — alert
+title+asset+time too).
 
-**One known exception:** the mock SIEM data
-(`app/seed/mock_scenario.py::MOCK_ALERTS`) computes alert timestamps
-relative to `datetime.now()` at **process import time**, not a fixed point.
-Re-running bootstrap within the same long-lived process is idempotent;
-re-running it from a **new process** (a fresh `python -m app.bootstrap`, a
-container restart) produces alerts with slightly different timestamps, which
-don't match the existing rows' natural key — so you get duplicate mock
-alerts and incidents piling up. This only affects the synthetic demo data;
-KEV entries, ATT&CK techniques, actor profiles, and detection rules/playbooks
-stay correctly deduplicated across any number of runs.
+Bootstrap is still not safe to run **concurrently** from multiple processes
+against a fresh, unseeded database (see
+[Scaling notes](#scaling-notes)) — run it once, then start replicas.
 
-In practice: bootstrap once per environment lifetime (or after clearing the
-database), not on every container restart. If you need a guaranteed-clean
-state, reset the database first:
+If you need a guaranteed-clean state (e.g. after changing the mock
+scenario itself), reset the database:
 
 ```bash
 # SQLite
@@ -312,5 +307,8 @@ live data.
 `app/services/vuln_prioritization.py::compute_risk_score()`; it's an
 intentionally unimplemented placeholder, not a deployment issue.
 
-**Duplicate incidents after a restart** — see the idempotency caveat in
-[Bootstrap and data lifecycle](#bootstrap-and-data-lifecycle).
+**Duplicate incidents after a restart** — shouldn't happen; re-bootstrap
+across process restarts is idempotent (see
+[Bootstrap and data lifecycle](#bootstrap-and-data-lifecycle)). If you do
+see duplicates, check whether bootstrap ran concurrently from more than one
+process against a not-yet-seeded database.
