@@ -66,6 +66,10 @@ bootstrap. Delete it to reset all state.
 
 ## Architecture
 
+A full pipeline diagram — every stage from raw feed to the human-approval
+gate, with every arrow labeled — is at
+[`docs/architecture-diagram.pdf`](docs/architecture-diagram.pdf).
+
 ### Connector abstraction (mock-to-real seam)
 
 `app/connectors/base.py` defines abstract interfaces for every external data
