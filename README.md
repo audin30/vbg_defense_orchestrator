@@ -73,7 +73,10 @@ bootstrap. Delete it to reset all state.
 
 A full pipeline diagram — every stage from raw feed to the human-approval
 gate, with every arrow labeled, including the Commander's pre-triage `gate()`
-step — is at [`docs/architecture-diagram.pdf`](docs/architecture-diagram.pdf).
+step — is below (or as a vector PDF at
+[`docs/architecture-diagram.pdf`](docs/architecture-diagram.pdf)).
+
+![Pipeline architecture diagram](docs/architecture-diagram.png)
 
 ### Connector abstraction (mock-to-real seam)
 
