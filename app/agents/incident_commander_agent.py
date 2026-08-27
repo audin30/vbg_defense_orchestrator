@@ -1,10 +1,19 @@
 """Incident Commander Agent.
 
-Final authority in the pipeline: takes the IR Agent's TriageReport and
-decides the response tier. Remediation is never automatic (HITL): the
-strongest decision the Commander can make is to QUEUE containment for
-human approval -- SOAR playbooks execute only when a person approves the
-resulting ContainmentApproval (services/approval_service.py).
+Gatekeeper *and* final authority in the pipeline. Bookends every incident:
+
+- `gate()` runs first, straight off the correlated Incident -- before the IR
+  Agent does anything. It only looks at cheap signals (incident severity/
+  confidence, plus one Inventory Agent lookup) and decides whether the
+  incident is worth the full triage pipeline (vuln/threat-intel lookups,
+  evidence planning, response sub-agent dispatch, LLM rationale) at all.
+  Incidents that don't clear the gate never reach the IR Agent -- `skip()`
+  records a direct MONITOR decision for them instead.
+- `decide()` runs after the IR Agent's triage, for anything that did clear
+  the gate, and picks the response tier. Remediation is never automatic
+  (HITL): the strongest decision here is to QUEUE containment for human
+  approval -- SOAR playbooks execute only when a person approves the
+  resulting ContainmentApproval (services/approval_service.py).
 
     critical  -> CONTAIN_PENDING_APPROVAL (file containment request, wait for a human)
     high      -> ESCALATE                 (page on-call, file ticket, wait for a human)
@@ -14,8 +23,10 @@ from sqlalchemy.orm import Session
 
 from app.agents import llm_reasoning
 from app.agents.context import TriageReport
+from app.agents.inventory_agent import inventory_agent
 from app.agents.response.aws import dispatch_aws_playbooks
 from app.models import (
+    AlertSeverity,
     CommanderDecision,
     ContainmentApproval,
     Incident,
@@ -32,6 +43,14 @@ _DECISION_BY_CRITICALITY = {
     "low": ResponseDecision.MONITOR,
 }
 
+# Gate thresholds: an incident routes into full triage if it clears any one
+# of these. Deliberately generous (an OR, not an AND) -- the gate exists to
+# filter obvious background noise, not to second-guess the IR Agent's own
+# weighted scoring. Tune alongside incident_response_agent._WEIGHTS if the
+# two start disagreeing about what counts as "worth a look."
+_GATE_MIN_CONFIDENCE = 0.4
+_GATE_MIN_ASSET_CRITICALITY = 4
+
 
 def _deterministic_summary(incident: Incident, triage: TriageReport, decision: ResponseDecision) -> str:
     action = {
@@ -44,7 +63,45 @@ def _deterministic_summary(incident: Incident, triage: TriageReport, decision: R
     return f"{incident.title} — {triage.criticality.upper()} ({triage.criticality_score}/1.0). {action}"
 
 
+def _deterministic_skip_summary(incident: Incident, inventory) -> str:
+    return (
+        f"{incident.title} — below triage threshold (severity {incident.severity.value}, "
+        f"confidence {incident.confidence}, max asset criticality {inventory.max_criticality}/5, "
+        f"internet-facing: {inventory.has_internet_facing_asset}). Monitored without full triage."
+    )
+
+
 class IncidentCommanderAgent:
+    def gate(self, db: Session, incident: Incident) -> bool:
+        """Cheap pre-triage screen. True routes the incident into the IR
+        Agent's full pipeline; False means `skip()` should be called instead."""
+        if incident.severity in (AlertSeverity.HIGH, AlertSeverity.CRITICAL):
+            return True
+        if incident.confidence >= _GATE_MIN_CONFIDENCE:
+            return True
+        asset_ids = list({a.asset_id for a in incident.alerts})
+        inventory = inventory_agent.get_context(db, asset_ids)
+        return (
+            inventory.has_internet_facing_asset
+            or inventory.max_criticality >= _GATE_MIN_ASSET_CRITICALITY
+        )
+
+    def skip(self, db: Session, incident: Incident) -> CommanderDecision:
+        """Records a direct MONITOR decision for an incident that didn't
+        clear `gate()` -- no IncidentTriage row, no evidence plan, no
+        response sub-agents spawned for it."""
+        asset_ids = list({a.asset_id for a in incident.alerts})
+        inventory = inventory_agent.get_context(db, asset_ids)
+        commander_decision = CommanderDecision(
+            incident_id=incident.id,
+            decision=ResponseDecision.MONITOR,
+            summary=_deterministic_skip_summary(incident, inventory),
+            reasoning_mode=ReasoningMode.DETERMINISTIC,
+        )
+        db.add(commander_decision)
+        db.commit()
+        return commander_decision
+
     def decide(self, db: Session, incident: Incident, triage: TriageReport) -> CommanderDecision:
         decision = _DECISION_BY_CRITICALITY[triage.criticality]
 

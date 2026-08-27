@@ -44,10 +44,15 @@ bootstrap. Delete it to reset all state.
 - **Correlates** related alerts into incidents — per-asset clustering by time
   window, then chained across assets when a lateral-movement technique
   bridges them.
-- **Triages** each incident through a five-agent pipeline that gathers asset
-  context, open vulnerabilities (KEV-prioritized), and threat intel matches
-  (IOC hits + ATT&CK TTP overlap against tracked actor profiles), then
-  computes a deterministic weighted criticality score.
+- **Gates before triaging.** The Incident Commander screens every correlated
+  incident on cheap signals alone (severity, confidence, one Inventory Agent
+  lookup) before the expensive pipeline runs at all — incidents that don't
+  clear the gate get a direct MONITOR decision with no triage, evidence
+  planning, or sub-agent dispatch spent on them.
+- **Triages** each incident that clears the gate through a five-agent
+  pipeline that gathers asset context, open vulnerabilities (KEV-prioritized),
+  and threat intel matches (IOC hits + ATT&CK TTP overlap against tracked
+  actor profiles), then computes a deterministic weighted criticality score.
 - **Plans evidence collection** — every recommended artifact is traceable to
   either the ATT&CK technique observed or a confirmed IOC match.
 - **Spawns response runbooks** — IRP-category sub-agents (malware,
@@ -67,8 +72,8 @@ bootstrap. Delete it to reset all state.
 ## Architecture
 
 A full pipeline diagram — every stage from raw feed to the human-approval
-gate, with every arrow labeled — is at
-[`docs/architecture-diagram.pdf`](docs/architecture-diagram.pdf).
+gate, with every arrow labeled, including the Commander's pre-triage `gate()`
+step — is at [`docs/architecture-diagram.pdf`](docs/architecture-diagram.pdf).
 
 ### Connector abstraction (mock-to-real seam)
 
@@ -109,7 +114,16 @@ Five agents in `app/agents/`, each wrapping services behind a typed contract
 | Vulnerability Management | Open findings on affected assets, KEV-first |
 | Threat Intel | IOC matches + ATT&CK technique-overlap actor matching |
 | **Incident Response** | Hub — synthesizes the three above, scores criticality, builds the evidence plan, spawns IRP response sub-agents |
-| **Incident Commander** | Gates response by criticality; the only place SOAR playbooks get triggered — and only after human approval |
+| **Incident Commander** | Bookends the pipeline: `gate()` screens each correlated incident *before* triage runs (cheap signals only — no LLM, no vuln/threat-intel lookups); `decide()` sets the response tier after triage. The only place SOAR playbooks get triggered — and only after human approval |
+
+The Commander's `gate()` is what keeps the expensive pipeline from running on
+obvious background noise: an incident routes into full IR Agent triage if its
+severity is high/critical, its correlation confidence clears a threshold, or
+an affected asset is internet-facing / high-criticality (one Inventory Agent
+lookup — no vuln scan, no threat intel, no LLM call). Anything that doesn't
+clear the gate gets a direct `MONITOR` `CommanderDecision` via `skip()`, with
+no `IncidentTriage` row, no evidence plan, and no response sub-agents spawned
+for it.
 
 Actor matching uses **incident coverage**, not Jaccard similarity — a real
 intrusion set with hundreds of known techniques would otherwise never

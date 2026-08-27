@@ -69,11 +69,17 @@ def run_bootstrap() -> dict:
         summary["incidents_created"] = len(incidents)
 
         decisions_by_type = {}
+        gated_in = 0
         for incident in incidents:
-            triage = incident_response_agent.triage(db, incident)
-            decision = incident_commander_agent.decide(db, incident, triage)
+            if incident_commander_agent.gate(db, incident):
+                gated_in += 1
+                triage = incident_response_agent.triage(db, incident)
+                decision = incident_commander_agent.decide(db, incident, triage)
+            else:
+                decision = incident_commander_agent.skip(db, incident)
             decisions_by_type[decision.decision.value] = decisions_by_type.get(decision.decision.value, 0) + 1
         summary["commander_decisions"] = decisions_by_type
+        summary["incidents_gated_into_triage"] = gated_in
 
         return summary
     finally:
