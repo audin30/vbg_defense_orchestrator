@@ -118,9 +118,10 @@ exposed as `POST /bootstrap`):
 2. `services/ingestion_service.run_full_ingestion` — pulls from all four
    connectors, normalizes into ORM rows, idempotent by natural key
    (hostname, cve_id+asset, alert title+asset+time, indicator value)
-3. `services/vuln_prioritization.recompute_all_risk_scores` — currently
-   raises `NotImplementedError` (see "Known incomplete piece" below);
-   bootstrap catches this and continues
+3. `services/vuln_prioritization.recompute_all_risk_scores` — recomputes
+   `Vulnerability.risk_score` for every row via `compute_risk_score()`
+   (CVSS × exposure multiplier, plus asset-criticality/EPSS/KEV terms — see
+   the Vulnerability prioritization section below)
 4. `services/correlation_service.correlate_alerts_into_incidents` — clusters
    unassigned alerts per-asset by time window, then chains clusters across
    assets when a lateral-movement technique (T1021/T1570/T1091/T1210)
@@ -242,6 +243,34 @@ nothing further to reject or fail. Both the rejected/failed outcome and the
 resulting decision are recorded in a `CommanderContainmentReview` row
 (`GET /containment-reviews`).
 
+Both this loop and `request_reanalysis()` replace (never stack on top of) the
+incident's current `CommanderDecision` via the shared
+`incident_commander_agent.supersede_commander_decision(db, decision)` helper
+— `CommanderDecision.incident_id` is unique, so a superseding decision must
+delete the old row first; this was originally written inline in two places
+with slightly different flush/commit timing and consolidated into one helper
+both callers (including the `/reanalyze` route) now use.
+
+### Manual override — the break-glass path
+
+`incident_commander_agent.manual_override(db, incident, decision, reason, approver)`,
+exposed as `POST /incidents/{id}/override`, is the third feedback path: a
+human sets the response tier directly, bypassing the Threat Analyzer's
+scoring and `decide()`'s criticality mapping entirely. It requires both a
+non-empty `reason` and a named `approver` (`ValueError` / 422 otherwise) —
+the highest audit bar of the three loops, since this is the one place a
+human overrides the deterministic pipeline's conclusion outright rather than
+sending it back through the pipeline (`request_reanalysis`) or only ever
+falling back (`handle_containment_outcome`). Intended for use once
+`request_reanalysis()`'s one retry is exhausted and a human still disagrees,
+but not gated on that state. Records a `CommanderManualOverride` row
+(`GET /manual-overrides`) with the prior decision for audit; if the override
+sets `CONTAIN_PENDING_APPROVAL`, it files a `ContainmentApproval` exactly as
+`decide()` would — overriding the tier never bypasses execution approval —
+unless one already exists for the incident (`ContainmentApproval` is
+one-per-incident; re-requesting containment after a prior approval was
+already decided isn't supported yet).
+
 ### Response sub-agents (IRP annexes)
 
 `app/agents/response/` holds one sub-agent per Incident Response Playbook
@@ -263,12 +292,15 @@ Two invariants to preserve:
    `TriageReport.response_plans`, `triage.response_tasks` in
    `GET /incidents`, and `GET /response-tasks`. Automated containment still
    only happens through the Commander's HITL approval gate (see above).
-2. **Ransomware is behavioral, not technique-triggered.** Its
-   `matches()` override exists so precursor combinations (e.g. cred dump +
-   lateral movement toward backup-tagged assets) can spawn the runbook
-   before T1486 fires — the heuristic body is a deliberate placeholder
-   (returns `False` beyond the direct T1486/T1490 triggers), same pattern
-   as `compute_risk_score()`.
+2. **Ransomware is behavioral, not just technique-triggered.** Its
+   `matches()` override spawns the runbook on two precursor patterns before
+   T1486/T1490 ever fire: credential dumping (T1003) + lateral movement
+   toward an asset tagged `backup` (staging before encryption), or
+   exfiltration (T1041) + lateral movement (double-extortion staging).
+   Lateral movement technique IDs are shared with
+   `correlation_service.LATERAL_MOVEMENT_TECHNIQUES` rather than
+   re-declared. Neither precursor alone is specific enough to trigger on its
+   own — both showed up in plenty of non-ransomware intrusions in testing.
 
 To add a category: subclass `ResponseSubAgent` in a new
 `app/agents/response/<category>.py` and append its instance to
@@ -353,15 +385,19 @@ on LLM availability, only the explanatory text changes. IR Agent uses
 `IncidentTriage`/`CommanderDecision` row records which mode
 (`deterministic`/`llm`) actually produced it.
 
-### Known incomplete piece
+### Vulnerability prioritization
 
-`app/services/vuln_prioritization.py::compute_risk_score()` intentionally
-raises `NotImplementedError` — the asset exposure/criticality-weighted risk
-formula is left as a deliberate placeholder (see the function's docstring
-for inputs and trade-offs). `recompute_all_risk_scores()` catches this
-during bootstrap so the rest of the app runs fine with `risk_score: 0.0`
-everywhere. `tests/test_vuln_prioritization.py` has three `@pytest.mark.skip`
-tests to un-skip once it's implemented.
+`app/services/vuln_prioritization.py::compute_risk_score()` is the asset
+exposure/criticality-weighted risk formula: CVSS is multiplied by an
+exposure factor (`_EXPOSURE_MULTIPLIER` — 1.5 internet-facing, 1.0 internal,
+0.5 isolated, since attacker access cost is what changes most sharply, not
+just severity), then `asset.criticality` and `vuln.epss_score` each add a
+small additive term, and a KEV-listed finding gets a flat `_KEV_BONUS`
+regardless of CVSS (confirmed active exploitation shouldn't need a high
+score to matter). `recompute_all_risk_scores()` runs this for every
+vulnerability during bootstrap; `ranked_vulnerabilities()` sorts by it
+descending for `GET /vulnerabilities`. Only the relative ordering within
+one deployment is meaningful — re-tune the weights to change risk appetite.
 
 ### The mock scenario
 
@@ -396,8 +432,21 @@ directly via `fetch()` — `/assets`, `/vulnerabilities`, `/alerts`,
 `/incidents` (embeds `threat_analysis` + `triage`, including
 `triage.evidence_items`, + `commander_decision` per incident),
 `/attack-coverage`, `/threat-actor-profiles`, `/threat-indicators`,
-`/evidence-items`, `/playbooks`, `/playbook-executions` — and a "Run
-Ingestion + Refresh" button that POSTs `/bootstrap` then reloads.
-Dark-theme only, no light-mode handling. `GET /threat-analyses` (highest
-`risk_score` first, `?recommended_only=true` filter) is exposed but not
-yet rendered anywhere in the dashboard.
+`/evidence-items`, `/playbooks`, `/playbook-executions`,
+`/reanalysis-requests`, `/containment-reviews`, `/manual-overrides` — and a
+"Run Ingestion + Refresh" button that POSTs `/bootstrap` then reloads.
+Dark-theme only, no light-mode handling.
+
+Each incident card renders a Threat Analyzer Agent block (risk score,
+rating, `risk_rank`, recommended/not-recommended badge) ahead of the
+Incident Response/Commander blocks. A not-recommended incident's block
+carries a **Request Re-Analysis** button (prompts for reason + optional
+rating floor, calls `POST /incidents/{id}/reanalyze`); every Commander
+decision block carries a **Manual Override…** button (prompts for response
+tier + reason + approver, calls `POST /incidents/{id}/override`). A
+**Commander Feedback Log** section below the playbook execution log merges
+all three audit trails (`/reanalysis-requests`, `/containment-reviews`,
+`/manual-overrides`) into one time-sorted table. `GET /threat-analyses`
+(highest `risk_score` first, `?recommended_only=true` filter) is exposed
+but still not rendered as its own view — each incident's own
+`threat_analysis` is what's shown today.

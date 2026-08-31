@@ -139,6 +139,20 @@
   .hitl-btn:disabled { opacity: 0.5; cursor: default; }
   .hitl-decided-note { font-size: 12px; color: var(--text-dim); }
 
+  .badge.recommended { background: rgba(103,194,58,0.15); color: #67c23a; }
+  .badge.not-recommended { background: rgba(139,152,165,0.15); color: var(--text-dim); }
+  .rank-chip {
+    font-size: 10px; font-weight: 700; color: var(--text-dim); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 6px;
+  }
+  .feedback-log-type {
+    font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px;
+    border-radius: 4px; padding: 1px 6px; border: 1px solid var(--border); color: var(--text-dim);
+  }
+  .feedback-log-type.reanalysis { color: var(--medium); border-color: rgba(214,168,58,0.35); }
+  .feedback-log-type.containment { color: var(--critical); border-color: rgba(224,71,90,0.35); }
+  .feedback-log-type.override { color: var(--accent); border-color: rgba(79,157,255,0.35); }
+
   .mode-chip {
     font-size: 10px; text-transform: uppercase; letter-spacing: 0.3px;
     color: var(--text-faint); border: 1px solid var(--border); border-radius: 4px;
@@ -293,6 +307,11 @@
     <h2>Playbook Execution Log</h2>
     <div class="section-body" id="playbook-log"></div>
   </section>
+
+  <section>
+    <h2>Commander Feedback Log <span class="dim" style="text-transform:none;font-weight:400;">(re-analysis requests, containment outcomes, manual overrides)</span></h2>
+    <div class="section-body" id="feedback-log"></div>
+  </section>
 </main>
 
 <script>
@@ -370,6 +389,7 @@ function renderIncidents(incidents) {
       </div>
     ` : "";
 
+    const ta = inc.threat_analysis;
     const t = inc.triage;
     const d = inc.commander_decision;
     const approval = inc.containment_approval;
@@ -393,8 +413,25 @@ function renderIncidents(incidents) {
     ` : "";
     const modeChip = (mode) => `<span class="mode-chip ${mode === "llm" ? "llm" : ""}">${mode === "llm" ? "LLM reasoning" : "deterministic"}</span>`;
 
-    const agentPipelineBlock = (t || d) ? `
+    const agentPipelineBlock = (ta || t || d) ? `
       <div class="agent-pipeline">
+        ${ta ? `
+          <div class="agent-block">
+            <div class="agent-block-head">
+              <span class="agent-name">Threat Analyzer Agent</span>
+              ${sevBadge(ta.risk_rating)}
+              <span class="dim">score ${ta.risk_score}</span>
+              ${ta.risk_rank ? `<span class="rank-chip">rank #${ta.risk_rank}</span>` : ""}
+              <span class="badge ${ta.recommended ? "recommended" : "not-recommended"}">${ta.recommended ? "recommended" : "not recommended"}</span>
+            </div>
+            <div class="agent-rationale">${esc(ta.rationale)}</div>
+            ${!ta.recommended ? `
+              <div class="hitl-actions" style="margin-top:8px;">
+                <button class="hitl-btn" onclick="requestReanalysis('${inc.id}')">Request Re-Analysis</button>
+              </div>
+            ` : ""}
+          </div>
+        ` : ""}
         ${t ? `
           <div class="agent-block">
             <div class="agent-block-head">
@@ -433,6 +470,9 @@ function renderIncidents(incidents) {
             <div class="agent-rationale">${esc(d.summary)}</div>
             ${runbookGroupsHtml(d.response_tasks, "AWS IRP playbooks activated by this decision")}
             ${hitlBlock}
+            <div class="hitl-actions" style="margin-top:8px;">
+              <button class="hitl-btn" onclick="manualOverride('${inc.id}')">Manual Override…</button>
+            </div>
           </div>
         ` : ""}
       </div>
@@ -485,7 +525,6 @@ function renderVulns(vulns) {
   const el = $("#vulns");
   if (!vulns.length) { el.innerHTML = `<div class="empty">No vulnerabilities ingested yet.</div>`; return; }
 
-  const anyScored = vulns.some(v => v.risk_score > 0);
   el.innerHTML = `
     <table>
       <thead><tr>
@@ -504,12 +543,11 @@ function renderVulns(vulns) {
             </td>
             <td class="mono">${v.cvss_score.toFixed(1)}</td>
             <td class="mono">${v.epss_score.toFixed(2)}</td>
-            <td class="mono">${v.risk_score > 0 ? v.risk_score.toFixed(2) : '<span class="dim">not scored</span>'}</td>
+            <td class="mono">${v.risk_score.toFixed(2)}</td>
           </tr>
         `).join("")}
       </tbody>
     </table>
-    ${anyScored ? "" : `<div class="empty" style="margin-top:10px;">Risk scoring isn't implemented yet (app/services/vuln_prioritization.py::compute_risk_score) — showing raw CVSS/EPSS only.</div>`}
   `;
 }
 
@@ -566,6 +604,91 @@ function renderPlaybookLog(executions, playbooks, incidents) {
   `;
 }
 
+function renderFeedbackLog(reanalysisRequests, containmentReviews, manualOverrides, incidents) {
+  const el = $("#feedback-log");
+  const incidentById = Object.fromEntries(incidents.map(i => [i.id, i]));
+  const incidentTitle = (id) => esc(incidentById[id]?.title ?? id);
+
+  const rows = [
+    ...reanalysisRequests.map(r => ({
+      time: r.created_at,
+      type: "reanalysis",
+      incidentId: r.incident_id,
+      detail: `${esc(r.reason)} — ${esc(r.prior_risk_rating)} (${r.prior_risk_score}) &rarr; ${esc(r.new_risk_rating)} (${r.new_risk_score})${r.requested_floor ? `, floor ${esc(r.requested_floor)}` : ""}`,
+    })),
+    ...containmentReviews.map(r => ({
+      time: r.created_at,
+      type: "containment",
+      incidentId: r.incident_id,
+      detail: `${esc(r.outcome.replace("_", " "))} — ${esc(r.prior_decision)} &rarr; ${esc(r.new_decision)}${r.note ? `: ${esc(r.note)}` : ""}`,
+    })),
+    ...manualOverrides.map(o => ({
+      time: o.created_at,
+      type: "override",
+      incidentId: o.incident_id,
+      detail: `${esc(o.approver)}: ${esc(o.reason)} &rarr; set to ${esc(o.decision)}${o.prior_decision ? ` (was ${esc(o.prior_decision)})` : ""}`,
+    })),
+  ].sort((a, b) => new Date(b.time) - new Date(a.time));
+
+  if (!rows.length) { el.innerHTML = `<div class="empty">No Commander disagreements or overrides recorded yet.</div>`; return; }
+
+  el.innerHTML = `
+    <table>
+      <thead><tr><th>Time</th><th>Type</th><th>Incident</th><th>Detail</th></tr></thead>
+      <tbody>
+        ${rows.map(r => `
+          <tr>
+            <td class="dim">${fmtTime(r.time)}</td>
+            <td><span class="feedback-log-type ${r.type}">${r.type}</span></td>
+            <td>${incidentTitle(r.incidentId)}</td>
+            <td>${r.detail}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+async function requestReanalysis(incidentId) {
+  const reason = window.prompt("Reason for requesting re-analysis (required):", "");
+  if (!reason) return;
+  const floor = window.prompt(
+    "Optional rating floor to raise to if the Analyzer's score is below it (low/medium/high/critical) — can only raise, never lower. Leave blank to just re-run:",
+    ""
+  );
+
+  try {
+    await fetchJSON(`/incidents/${incidentId}/reanalyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason, override_floor: floor ? floor.trim().toLowerCase() : null }),
+    });
+    await loadAll();
+  } catch (err) {
+    alert(`Re-analysis request failed: ${err.message}`);
+  }
+}
+
+async function manualOverride(incidentId) {
+  const decision = window.prompt("Response tier to set (monitor / escalate / contain_pending_approval):", "escalate");
+  if (!decision) return;
+  const reason = window.prompt("Reason for this override (required):", "");
+  if (!reason) return;
+  const approver = window.prompt("Your name/handle (recorded on the override):", "");
+  if (!approver) return;
+
+  try {
+    await fetchJSON(`/incidents/${incidentId}/override`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ decision: decision.trim().toLowerCase(), reason, approver }),
+    });
+    await loadAll();
+  } catch (err) {
+    alert(`Manual override failed: ${err.message}`);
+  }
+}
+
 async function decideContainment(approvalId, action) {
   const approver = window.prompt("Your name/handle (recorded on the approval):", "");
   if (!approver) return;
@@ -589,7 +712,10 @@ async function decideContainment(approvalId, action) {
 
 async function loadAll() {
   $("#status-line").textContent = "loading…";
-  const [assets, vulns, incidents, coverage, playbooks, executions, actorProfiles, indicators] = await Promise.all([
+  const [
+    assets, vulns, incidents, coverage, playbooks, executions, actorProfiles, indicators,
+    reanalysisRequests, containmentReviews, manualOverrides,
+  ] = await Promise.all([
     fetchJSON("/assets"),
     fetchJSON("/vulnerabilities?limit=50"),
     fetchJSON("/incidents"),
@@ -598,6 +724,9 @@ async function loadAll() {
     fetchJSON("/playbook-executions"),
     fetchJSON("/threat-actor-profiles?limit=6"),
     fetchJSON("/threat-indicators"),
+    fetchJSON("/reanalysis-requests"),
+    fetchJSON("/containment-reviews"),
+    fetchJSON("/manual-overrides"),
   ]);
 
   renderStats(assets, vulns, incidents, coverage);
@@ -606,6 +735,7 @@ async function loadAll() {
   renderVulns(vulns);
   renderThreatIntel(actorProfiles, indicators);
   renderPlaybookLog(executions, playbooks, incidents);
+  renderFeedbackLog(reanalysisRequests, containmentReviews, manualOverrides, incidents);
 
   $("#status-line").textContent = `updated ${new Date().toLocaleTimeString()}`;
 }

@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.agents import incident_commander_agent, incident_response_agent
-from app.agents.incident_commander_agent import ReanalysisAlreadyRequested
+from app.agents.incident_commander_agent import ReanalysisAlreadyRequested, supersede_commander_decision
 from app.bootstrap import run_bootstrap
 from app.db import get_db
 from app.models import (
@@ -13,6 +13,7 @@ from app.models import (
     Asset,
     CommanderContainmentReview,
     CommanderDecision,
+    CommanderManualOverride,
     CommanderReanalysisRequest,
     ContainmentApproval,
     DetectionRule,
@@ -22,6 +23,7 @@ from app.models import (
     KevEntry,
     Playbook,
     PlaybookExecution,
+    ResponseDecision,
     ResponseTask,
     ThreatActorProfile,
     ThreatAnalysis,
@@ -173,6 +175,18 @@ def _containment_review_dict(r: CommanderContainmentReview) -> dict:
         "prior_decision": r.prior_decision.value,
         "new_decision": r.new_decision.value,
         "created_at": r.created_at.isoformat(),
+    }
+
+
+def _manual_override_dict(o: CommanderManualOverride) -> dict:
+    return {
+        "id": o.id,
+        "incident_id": o.incident_id,
+        "decision": o.decision.value,
+        "reason": o.reason,
+        "approver": o.approver,
+        "prior_decision": o.prior_decision.value if o.prior_decision else None,
+        "created_at": o.created_at.isoformat(),
     }
 
 
@@ -427,9 +441,8 @@ def reanalyze_incident(incident_id: str, body: ReanalysisRequest, db: Session = 
         # flipped it into scope, so run the pipeline it should have gone
         # through the first time.
         stale_decision = db.query(CommanderDecision).filter_by(incident_id=incident.id).one_or_none()
-        if stale_decision is not None:
-            db.delete(stale_decision)
-            db.commit()
+        supersede_commander_decision(db, stale_decision)
+        db.commit()
         triage = incident_response_agent.triage(db, incident, risk_assessment)
         incident_commander_agent.decide(db, incident, triage)
 
@@ -445,6 +458,46 @@ def list_containment_reviews(db: Session = Depends(get_db)):
         _containment_review_dict(r)
         for r in db.query(CommanderContainmentReview).order_by(CommanderContainmentReview.created_at.desc()).all()
     ]
+
+
+class ManualOverrideRequest(BaseModel):
+    decision: str  # ResponseDecision value
+    reason: str
+    approver: str
+
+
+@router.get("/manual-overrides")
+def list_manual_overrides(db: Session = Depends(get_db)):
+    """Audit trail of break-glass Commander overrides -- a human setting the
+    response tier directly, bypassing the Threat Analyzer and decide()."""
+    return [
+        _manual_override_dict(o)
+        for o in db.query(CommanderManualOverride).order_by(CommanderManualOverride.created_at.desc()).all()
+    ]
+
+
+@router.post("/incidents/{incident_id}/override")
+def override_incident_decision(incident_id: str, body: ManualOverrideRequest, db: Session = Depends(get_db)):
+    """Break-glass: set the response tier directly, bypassing the Threat
+    Analyzer's scoring and decide()'s criticality mapping entirely. Requires
+    both a reason and a named approver. Intended for once
+    request_reanalysis()'s one retry is exhausted and a human still
+    disagrees, but usable at any point."""
+    incident = db.get(Incident, incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    try:
+        decision = ResponseDecision(body.decision)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Unknown decision '{body.decision}'")
+
+    try:
+        incident_commander_agent.manual_override(db, incident, decision, body.reason, body.approver)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    return _incident_dict(incident, db)
 
 
 @router.get("/evidence-items")

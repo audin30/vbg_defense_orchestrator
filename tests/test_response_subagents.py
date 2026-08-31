@@ -60,7 +60,11 @@ def test_attack_chain_spawns_matching_subagents_only(db_session):
     plans = dispatch_response_subagents(incident)
     categories = {p.category for p in plans}
 
-    assert categories == {"malware", "credential_compromise", "lateral_movement", "data_exfiltration"}
+    # T1041 (exfil) + T1021 (lateral movement) is also the double-extortion
+    # precursor pattern, so ransomware spawns here too even with no T1486/T1490.
+    assert categories == {
+        "malware", "credential_compromise", "lateral_movement", "data_exfiltration", "ransomware",
+    }
 
 
 def test_per_host_steps_scoped_to_hosts_where_trigger_technique_was_seen(db_session):
@@ -111,6 +115,59 @@ def test_encryption_for_impact_triggers_ransomware_runbook(db_session):
     plans = dispatch_response_subagents(incident)
 
     assert "ransomware" in {p.category for p in plans}
+
+
+def test_credential_dump_and_lateral_movement_toward_backup_asset_triggers_ransomware_precursor(db_session):
+    web = _asset(db_session, "web-01", criticality=4, exposure=Exposure.INTERNET_FACING)
+    vault = _asset(db_session, "backup-vault-01", criticality=5, tags="backup,isolated")
+    alerts = [
+        _alert(db_session, web, "lsass access", AlertSeverity.CRITICAL, "T1003", minutes_ago=60),
+        _alert(db_session, vault, "smb pivot to backup vault", AlertSeverity.HIGH, "T1021", minutes_ago=30),
+    ]
+    incident = _incident(db_session, web, alerts)
+
+    plans = dispatch_response_subagents(incident)
+
+    assert "ransomware" in {p.category for p in plans}
+
+
+def test_credential_dump_and_lateral_movement_without_backup_asset_does_not_trigger_ransomware(db_session):
+    web = _asset(db_session, "web-01", criticality=4, exposure=Exposure.INTERNET_FACING)
+    ws = _asset(db_session, "ws-02", criticality=2)  # no "backup" tag
+    alerts = [
+        _alert(db_session, web, "lsass access", AlertSeverity.CRITICAL, "T1003", minutes_ago=60),
+        _alert(db_session, ws, "smb pivot", AlertSeverity.HIGH, "T1021", minutes_ago=30),
+    ]
+    incident = _incident(db_session, web, alerts)
+
+    plans = dispatch_response_subagents(incident)
+
+    assert "ransomware" not in {p.category for p in plans}
+
+
+def test_exfiltration_and_lateral_movement_triggers_ransomware_precursor_without_backup_asset(db_session):
+    web = _asset(db_session, "web-01", criticality=4, exposure=Exposure.INTERNET_FACING)
+    dc = _asset(db_session, "dc-01", criticality=5)
+    alerts = [
+        _alert(db_session, dc, "smb pivot", AlertSeverity.HIGH, "T1021", minutes_ago=60),
+        _alert(db_session, dc, "exfil", AlertSeverity.CRITICAL, "T1041", minutes_ago=30),
+    ]
+    incident = _incident(db_session, web, alerts)
+
+    plans = dispatch_response_subagents(incident)
+
+    assert "ransomware" in {p.category for p in plans}
+
+
+def test_lateral_movement_alone_does_not_trigger_ransomware_precursor(db_session):
+    web = _asset(db_session, "web-01", criticality=4)
+    dc = _asset(db_session, "dc-01", criticality=5, tags="backup")
+    alert = _alert(db_session, dc, "smb pivot", AlertSeverity.HIGH, "T1021")
+    incident = _incident(db_session, web, [alert])
+
+    plans = dispatch_response_subagents(incident)
+
+    assert "ransomware" not in {p.category for p in plans}
 
 
 def test_all_runbooks_use_known_phases_and_are_ordered(db_session):

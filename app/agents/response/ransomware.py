@@ -9,6 +9,16 @@ spin up this runbook early.
 """
 from app.agents.response.base import ResponseSubAgent
 from app.models import Incident
+from app.services.correlation_service import LATERAL_MOVEMENT_TECHNIQUES
+
+# Precursor signals, evaluated together rather than as single triggers -- any
+# one of these alone is too noisy (lateral movement and credential dumping
+# both show up in plenty of non-ransomware intrusions), but each combination
+# below is specific enough to real ransomware playbooks (double-extortion
+# staging, backup-tampering-before-encryption) to justify spinning up the
+# runbook before T1486/T1490 ever fires.
+_CREDENTIAL_DUMPING = frozenset({"T1003"})
+_EXFILTRATION = frozenset({"T1041"})
 
 
 class RansomwareResponseAgent(ResponseSubAgent):
@@ -30,25 +40,26 @@ class RansomwareResponseAgent(ResponseSubAgent):
         if super().matches(incident, observed_technique_ids):
             return True
 
-        # TODO(you): precursor heuristic -- should this runbook ALSO spin up
-        # before encryption starts, based on a combination of earlier-stage
-        # signals? This is a judgment call about false-positive tolerance:
-        # firing early buys the response team the only window in which backups
-        # can still be protected, but too loose a pattern spawns a ransomware
-        # runbook on every noisy intrusion.
-        #
-        # Signals you have available here:
-        #   observed_technique_ids            e.g. {"T1003", "T1021", "T1041"}
-        #   incident.alerts[i].asset.tags     comma-separated, e.g. "backup,isolated"
-        #   incident.alerts[i].asset.hostname
-        #
-        # Patterns real IRPs use (pick/combine, or design your own):
-        #   - credential dumping (T1003) + lateral movement (T1021) + any alert
-        #     touching an asset tagged "backup"
-        #   - exfiltration (T1041) + lateral movement (double-extortion staging)
-        #   - shadow-copy deletion (T1490) alone is already a direct trigger above
-        #
-        # Return True to spawn this runbook for the incident.
+        has_lateral_movement = bool(observed_technique_ids & LATERAL_MOVEMENT_TECHNIQUES)
+        if not has_lateral_movement:
+            return False  # neither precursor pattern below fires without it
+
+        # Credential dumping + lateral movement toward backup infrastructure:
+        # the classic pre-encryption staging move, since backups are the
+        # thing that makes ransom leverage go away.
+        if observed_technique_ids & _CREDENTIAL_DUMPING:
+            touches_backup_asset = any(
+                "backup" in {t.strip() for t in (alert.asset.tags or "").split(",")}
+                for alert in incident.alerts
+            )
+            if touches_backup_asset:
+                return True
+
+        # Exfiltration + lateral movement: double-extortion staging (steal
+        # first, encrypt second) even before any backup-tagged asset is hit.
+        if observed_technique_ids & _EXFILTRATION:
+            return True
+
         return False
 
 

@@ -12,12 +12,14 @@ from app.models import (
     ApprovalStatus,
     Asset,
     CommanderDecision,
+    CommanderManualOverride,
     CommanderReanalysisRequest,
     ContainmentApproval,
     Exposure,
     Incident,
     IncidentTriage,
     PlaybookExecution,
+    ReasoningMode,
     ResponseDecision,
     ThreatActorProfile,
     ThreatIndicator,
@@ -209,3 +211,53 @@ def test_commander_reanalysis_reroutes_a_previously_skipped_incident_into_triage
 
     assert triage.criticality == "high"
     assert decision.decision == ResponseDecision.ESCALATE
+
+
+def test_manual_override_bypasses_analyzer_and_replaces_prior_decision(db_session):
+    ws = _asset(db_session, "ws-01", criticality=2, exposure=Exposure.INTERNAL)
+    alert = _alert(db_session, ws, "minor alert", AlertSeverity.LOW, "T1110")
+    incident = _incident(db_session, ws, [alert], severity=AlertSeverity.LOW, confidence=0.1)
+
+    risk_assessment = incident_commander_agent.gate(db_session, incident)
+    incident_commander_agent.skip(db_session, incident, risk_assessment)
+    assert db_session.query(CommanderDecision).filter_by(incident_id=incident.id).one().decision == ResponseDecision.MONITOR
+
+    decision = incident_commander_agent.manual_override(
+        db_session, incident, ResponseDecision.ESCALATE,
+        reason="analyst has out-of-band intel this is targeted", approver="soc-lead@example.com",
+    )
+
+    assert decision.decision == ResponseDecision.ESCALATE
+    assert decision.reasoning_mode == ReasoningMode.HUMAN_OVERRIDE
+    # replaced, not stacked -- still exactly one CommanderDecision for this incident
+    assert db_session.query(CommanderDecision).filter_by(incident_id=incident.id).count() == 1
+
+    record = db_session.query(CommanderManualOverride).filter_by(incident_id=incident.id).one()
+    assert record.approver == "soc-lead@example.com"
+    assert record.prior_decision == ResponseDecision.MONITOR
+    assert record.decision == ResponseDecision.ESCALATE
+
+
+def test_manual_override_requires_reason_and_approver(db_session):
+    ws = _asset(db_session, "ws-01")
+    alert = _alert(db_session, ws, "minor alert", AlertSeverity.LOW, "T1110")
+    incident = _incident(db_session, ws, [alert], severity=AlertSeverity.LOW, confidence=0.1)
+
+    with pytest.raises(ValueError):
+        incident_commander_agent.manual_override(db_session, incident, ResponseDecision.ESCALATE, reason="", approver="x")
+    with pytest.raises(ValueError):
+        incident_commander_agent.manual_override(db_session, incident, ResponseDecision.ESCALATE, reason="x", approver="")
+
+
+def test_manual_override_to_contain_files_containment_approval(db_session):
+    ws = _asset(db_session, "ws-01", criticality=2)
+    alert = _alert(db_session, ws, "minor alert", AlertSeverity.LOW, "T1110")
+    incident = _incident(db_session, ws, [alert], severity=AlertSeverity.LOW, confidence=0.1)
+
+    incident_commander_agent.manual_override(
+        db_session, incident, ResponseDecision.CONTAIN_PENDING_APPROVAL,
+        reason="out-of-band confirmation of active ransomware staging", approver="soc-lead@example.com",
+    )
+
+    approval = db_session.query(ContainmentApproval).filter_by(incident_id=incident.id).one()
+    assert approval.status == ApprovalStatus.PENDING

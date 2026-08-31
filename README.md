@@ -69,22 +69,33 @@ bootstrap. Delete it to reset all state.
   floor that can only raise the rating, never lower it) is capped at one
   retry per incident and logged to a `CommanderReanalysisRequest` audit
   trail (`GET /reanalysis-requests`) — a bounded escalation, not a loop.
+- **Falls back, rather than dead-ending, when containment doesn't go
+  through.** A rejected containment request, or an approval that matches no
+  SOAR playbook, is fed back to the Commander to fall back to `ESCALATE`
+  (`GET /containment-reviews` for the audit trail) — see
+  [Human-in-the-loop containment approval](#human-in-the-loop-containment-approval).
+- **Lets a human commander override the response tier outright.** The
+  break-glass path (`POST /incidents/{id}/override`, requiring a reason and
+  a named approver) bypasses the Threat Analyzer and `decide()` entirely —
+  for once the one re-analysis retry above is exhausted and a human still
+  disagrees (`GET /manual-overrides` for the audit trail).
 - **Gates all remediation behind human approval.** The Incident Commander
   never executes containment automatically — a critical incident files a
   containment request previewing exactly which SOAR playbooks would run;
   nothing executes until an analyst approves it via the dashboard or API.
 - **Maps detection coverage** against MITRE ATT&CK and prioritizes
-  vulnerabilities by asset criticality and exposure (this last piece —
-  `compute_risk_score()` — is an intentionally unimplemented placeholder;
-  see below).
+  vulnerabilities by an asset exposure/criticality/EPSS/KEV-weighted risk
+  score (`compute_risk_score()` — internet-facing findings are weighted far
+  above internal/isolated ones, since attacker access cost matters more than
+  raw CVSS).
 
 ## Architecture
 
 A full pipeline diagram — every stage from raw feed to the human-approval
 gate, with every arrow labeled, including the Threat Analyzer Agent, the
-Commander's pre-triage `gate()` step, and the two bounded human feedback
-loops (re-analysis, and the containment-outcome fallback to `ESCALATE`) —
-is below (or as a vector PDF at
+Commander's pre-triage `gate()` step, and the three bounded human feedback
+loops (re-analysis, the containment-outcome fallback to `ESCALATE`, and the
+break-glass manual override) — is below (or as a vector PDF at
 [`docs/architecture-diagram.pdf`](docs/architecture-diagram.pdf)).
 
 ![Pipeline architecture diagram](docs/architecture-diagram.png)
@@ -234,23 +245,24 @@ in-memory SQLite regardless of `DATABASE_URL`.
 
 `app/static/index.html` is a single self-contained file (inline CSS/JS, no
 build step) served at `GET /`. It calls the JSON API directly via `fetch()`.
-`GET /threat-analyses` (highest risk first, `?recommended_only=true` filter)
-and the `threat_analysis` field embedded per incident in `GET /incidents`
-are exposed but not yet rendered in the dashboard.
+Each incident card renders its Threat Analyzer Agent assessment (score,
+rating, `risk_rank`, recommended badge) with a **Request Re-Analysis**
+button when not recommended, and every Commander decision carries a
+**Manual Override…** button; a **Commander Feedback Log** section merges
+the re-analysis, containment-review, and manual-override audit trails into
+one table. `GET /threat-analyses` (highest risk first,
+`?recommended_only=true` filter) is exposed but not rendered as its own
+view — each incident's own `threat_analysis` is what's shown today.
 
 ## Known incomplete pieces
 
-- **`compute_risk_score()`** in `app/services/vuln_prioritization.py`
-  intentionally raises `NotImplementedError` — the asset exposure/
-  criticality-weighted risk formula is a deliberate placeholder (see the
-  function's docstring for inputs and trade-offs). Bootstrap catches this and
-  the rest of the app runs fine with `risk_score: 0.0` everywhere.
-- **Ransomware precursor heuristic** in `app/agents/response/ransomware.py` —
-  the direct T1486/T1490 triggers work today; the `matches()` override for
-  spotting a ransomware pattern *before* encryption starts (e.g. credential
-  dumping + lateral movement toward backup infrastructure) is a placeholder.
 - **VirusTotal enrichment** — `IocEnrichmentConnector` seam is defined and
   wired to a no-op by default; no implementation yet.
+- **Re-requesting containment after a decided approval** — `manual_override()`
+  to `CONTAIN_PENDING_APPROVAL` only files a new `ContainmentApproval` if the
+  incident doesn't already have one; `ContainmentApproval` is one-per-incident,
+  so there's no way yet to re-request containment after a prior approval was
+  already approved or rejected.
 
 ## The mock scenario
 

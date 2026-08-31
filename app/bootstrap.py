@@ -60,10 +60,7 @@ def run_bootstrap() -> dict:
         summary["playbooks"] = seed_playbooks(db)
         summary["ingestion"] = ingestion_service.run_full_ingestion(db)
 
-        try:
-            summary["risk_scores_updated"] = recompute_all_risk_scores(db)
-        except NotImplementedError as e:
-            summary["risk_scores_updated"] = f"SKIPPED: {e}"
+        summary["risk_scores_updated"] = recompute_all_risk_scores(db)
 
         incidents = correlation_service.correlate_alerts_into_incidents(db)
         summary["incidents_created"] = len(incidents)

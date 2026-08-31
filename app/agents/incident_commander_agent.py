@@ -36,6 +36,13 @@ Threat Analyzer and IR Agent:
   stuck on a request that isn't going to execute. This is terminal, not a
   loop: ESCALATE files no approval of its own, so there's nothing further to
   reject or fail.
+- `manual_override()` is the break-glass path: a human sets the response tier
+  directly, bypassing the Threat Analyzer's scoring and decide()'s
+  criticality mapping entirely. Requires both a reason and a named approver
+  -- a higher audit bar than the two loops above, since this is the one place
+  a human overrides the deterministic pipeline outright rather than sending
+  it back through it. Intended for once request_reanalysis()'s one retry is
+  exhausted and a human still disagrees, but not gated on that state.
 """
 from sqlalchemy.orm import Session
 
@@ -47,6 +54,7 @@ from app.models import (
     AlertSeverity,
     CommanderContainmentReview,
     CommanderDecision,
+    CommanderManualOverride,
     CommanderReanalysisRequest,
     ContainmentApproval,
     ContainmentOutcome,
@@ -102,6 +110,19 @@ def _deterministic_summary(incident: Incident, triage: TriageReport, decision: R
 
 def _deterministic_skip_summary(incident: Incident, risk_assessment: RiskAssessment) -> str:
     return f"{incident.title} — {risk_assessment.rationale} No IR Agent triage run."
+
+
+def supersede_commander_decision(db: Session, decision: CommanderDecision | None) -> None:
+    """Deletes an existing CommanderDecision so a replacement can be recorded
+    in its place (CommanderDecision.incident_id is unique -- there's only ever
+    one current decision per incident). Flushes but doesn't commit; callers
+    add the replacement and commit both in the same transaction. Shared by
+    both places that replace rather than append a decision:
+    handle_containment_outcome() below, and the reanalyze API route when a
+    skipped incident flips into full triage."""
+    if decision is not None:
+        db.delete(decision)
+        db.flush()
 
 
 class IncidentCommanderAgent:
@@ -218,9 +239,7 @@ class IncidentCommanderAgent:
             model=llm_reasoning.COMMANDER_MODEL,
         )
 
-        if prior_decision is not None:
-            db.delete(prior_decision)
-            db.flush()
+        supersede_commander_decision(db, prior_decision)
         new_decision = CommanderDecision(
             incident_id=incident.id,
             decision=fallback,
@@ -238,6 +257,68 @@ class IncidentCommanderAgent:
                 new_decision=fallback,
             )
         )
+        db.commit()
+        return new_decision
+
+    def manual_override(
+        self,
+        db: Session,
+        incident: Incident,
+        decision: ResponseDecision,
+        reason: str,
+        approver: str,
+    ) -> CommanderDecision:
+        """Break-glass: a human sets the response tier directly, bypassing
+        the Threat Analyzer and decide()'s criticality mapping outright.
+        Requires a non-empty `reason` and a named `approver` -- unlike
+        request_reanalysis() (still scored by the Analyzer) or
+        handle_containment_outcome() (only ever falls back), this is a human
+        overriding the deterministic pipeline's conclusion entirely, so it
+        gets the highest audit bar of the three feedback paths. Replaces any
+        existing CommanderDecision. If the override decision is
+        CONTAIN_PENDING_APPROVAL, files a ContainmentApproval exactly as
+        decide() would -- overriding the response *tier* never bypasses
+        execution approval -- unless one already exists for this incident
+        (ContainmentApproval is one-per-incident; re-requesting containment
+        after a prior approval was already decided isn't supported yet)."""
+        if not reason or not reason.strip():
+            raise ValueError("manual_override requires a reason")
+        if not approver or not approver.strip():
+            raise ValueError("manual_override requires a named approver")
+
+        prior_decision = db.query(CommanderDecision).filter_by(incident_id=incident.id).one_or_none()
+        prior_response = prior_decision.decision if prior_decision else None
+        supersede_commander_decision(db, prior_decision)
+
+        summary = (
+            f"{incident.title} — manual override by {approver}: {reason} "
+            f"(response tier set to {decision.value.upper()})"
+        )
+        new_decision = CommanderDecision(
+            incident_id=incident.id,
+            decision=decision,
+            summary=summary,
+            reasoning_mode=ReasoningMode.HUMAN_OVERRIDE,
+        )
+        db.add(new_decision)
+        db.add(
+            CommanderManualOverride(
+                incident_id=incident.id,
+                decision=decision,
+                reason=reason,
+                approver=approver,
+                prior_decision=prior_response,
+            )
+        )
+        if decision == ResponseDecision.CONTAIN_PENDING_APPROVAL:
+            existing_approval = db.query(ContainmentApproval).filter_by(incident_id=incident.id).one_or_none()
+            if existing_approval is None:
+                would_run = soar_engine.matching_playbooks(db, incident)
+                preview = (
+                    "; ".join(f"{p.name} ({p.actions})" for p in would_run)
+                    or "No SOAR playbooks currently match; approval would execute nothing."
+                )
+                db.add(ContainmentApproval(incident_id=incident.id, requested_actions=preview))
         db.commit()
         return new_decision
 

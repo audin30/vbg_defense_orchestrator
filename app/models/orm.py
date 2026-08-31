@@ -233,6 +233,10 @@ class KevEntry(Base):
 class ReasoningMode(str, enum.Enum):
     DETERMINISTIC = "deterministic"
     LLM = "llm"
+    # A human commander set the response tier directly via manual_override(),
+    # bypassing both the Threat Analyzer's scoring and decide()'s criticality
+    # mapping -- distinct from the two automated modes above.
+    HUMAN_OVERRIDE = "human_override"
 
 
 class ThreatAnalysis(Base):
@@ -448,6 +452,29 @@ class CommanderContainmentReview(Base):
     note: Mapped[str] = mapped_column(Text, default="")
     prior_decision: Mapped[ResponseDecision] = mapped_column(Enum(ResponseDecision))
     new_decision: Mapped[ResponseDecision] = mapped_column(Enum(ResponseDecision))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+    incident: Mapped["Incident"] = relationship()
+
+
+class CommanderManualOverride(Base):
+    """Audit trail for incident_commander_agent.manual_override() -- the
+    break-glass path where a human sets the response tier directly, bypassing
+    the Threat Analyzer's scoring and decide()'s criticality mapping outright.
+    Requires both a reason and a named approver, a higher bar than the other
+    two feedback loops (request_reanalysis still goes through the Analyzer;
+    handle_containment_outcome only ever falls back, never escalates).
+    Intended for use once request_reanalysis()'s one retry is exhausted and a
+    human still disagrees, but not gated on that state."""
+
+    __tablename__ = "commander_manual_overrides"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    incident_id: Mapped[str] = mapped_column(ForeignKey("incidents.id"))
+    decision: Mapped[ResponseDecision] = mapped_column(Enum(ResponseDecision))
+    reason: Mapped[str] = mapped_column(Text)
+    approver: Mapped[str] = mapped_column(String)
+    prior_decision: Mapped[ResponseDecision | None] = mapped_column(Enum(ResponseDecision), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
     incident: Mapped["Incident"] = relationship()
