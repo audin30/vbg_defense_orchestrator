@@ -450,3 +450,23 @@ all three audit trails (`/reanalysis-requests`, `/containment-reviews`,
 (highest `risk_score` first, `?recommended_only=true` filter) is exposed
 but still not rendered as its own view — each incident's own
 `threat_analysis` is what's shown today.
+
+### Admin console
+
+`app/static/admin.html`, served at `GET /admin` by `app/main.py`, is a
+second self-contained dashboard page for an operator persona distinct from
+the per-incident analyst view above — linked from `index.html`'s header
+("Admin Console →") and linking back the same way. Two sections:
+
+- **Pending HITL Approvals** — the same `GET /containment-approvals?status=pending`
+  queue as the incident cards, but as its own prioritized list with inline
+  Approve/Reject (same `POST /containment-approvals/{id}/approve|reject`
+  calls) — meant to be the one screen an on-call approver needs, without
+  hunting through incident cards.
+- **System Activity Feed** — a single chronological table merging
+  `GET /commander-decisions` (new: every `CommanderDecision` across every
+  incident, not just one at a time) with the three feedback-loop audit
+  trails and `/playbook-executions`, filterable by type (chips computed
+  client-side from the merged rows, not separate queries). Auto-refreshes
+  every 15s (toggle in the header) since this is meant to stay open as a
+  monitoring view, not just a one-shot load like the incident dashboard.

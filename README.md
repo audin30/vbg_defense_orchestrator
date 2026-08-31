@@ -254,6 +254,14 @@ one table. `GET /threat-analyses` (highest risk first,
 `?recommended_only=true` filter) is exposed but not rendered as its own
 view — each incident's own `threat_analysis` is what's shown today.
 
+`app/static/admin.html`, served at `GET /admin`, is a separate console for
+an operator persona: a prioritized **Pending HITL Approvals** queue (same
+approve/reject actions as the incident cards) and a filterable **System
+Activity Feed** merging every Commander decision (`GET /commander-decisions`)
+with the three feedback-loop audit trails and playbook executions into one
+chronological table. Auto-refreshes every 15s. Linked from the incident
+dashboard's header and back.
+
 ## Known incomplete pieces
 
 - **VirusTotal enrichment** — `IocEnrichmentConnector` seam is defined and

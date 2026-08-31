@@ -515,6 +515,26 @@ def list_response_tasks(db: Session = Depends(get_db)):
     ]
 
 
+@router.get("/commander-decisions")
+def list_commander_decisions(db: Session = Depends(get_db)):
+    """Every Commander decision across every incident, newest first -- the
+    admin console's activity feed pulls this alongside the three feedback-
+    loop audit trails and /playbook-executions for one merged timeline."""
+    decisions = db.query(CommanderDecision).order_by(CommanderDecision.created_at.desc()).all()
+    return [
+        {
+            "id": d.id,
+            "incident_id": d.incident_id,
+            "incident_title": d.incident.title,
+            "decision": d.decision.value,
+            "summary": d.summary,
+            "reasoning_mode": d.reasoning_mode.value,
+            "created_at": d.created_at.isoformat(),
+        }
+        for d in decisions
+    ]
+
+
 class ApprovalDecisionRequest(BaseModel):
     approver: str
     note: str = ""

@@ -35,7 +35,9 @@ For architecture and how the app is put together, see
 - Outbound HTTPS access to `www.cisa.gov` and `raw.githubusercontent.com`
   for live threat-intel ingestion (optional — see below)
 - No message queue, cache, or search service. No build step for the
-  frontend — `app/static/index.html` is served as-is.
+  frontend — `app/static/index.html` (analyst incident dashboard, `GET /`)
+  and `app/static/admin.html` (operator console — HITL approval queue +
+  system activity feed, `GET /admin`) are both served as-is.
 
 ## Configuration (environment variables)
 

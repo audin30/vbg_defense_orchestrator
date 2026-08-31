@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>VBG Defense Orchestrator — Admin Console</title>
+<style>
+  :root {
+    --bg: #0b0f14;
+    --bg-panel: #121820;
+    --bg-panel-alt: #171f2a;
+    --border: #232d3a;
+    --text: #e6edf3;
+    --text-dim: #8b98a5;
+    --text-faint: #5b6b7a;
+    --accent: #4f9dff;
+    --low: #5b7a99;
+    --medium: #d6a83a;
+    --high: #e07b39;
+    --critical: #e0475a;
+    --good: #3ecf8e;
+    --radius: 8px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    z-index: 10;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: 0.2px;
+  }
+  header h1 span { color: var(--text-faint); font-weight: 400; }
+  #status-line { font-size: 12px; color: var(--text-faint); margin-top: 2px; }
+  .header-actions { display: flex; align-items: center; gap: 12px; }
+  .auto-refresh-toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
+  a.nav-link {
+    color: var(--accent); text-decoration: none; font-size: 13px; font-weight: 600;
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px 14px;
+  }
+  a.nav-link:hover { border-color: var(--accent); }
+  button {
+    background: var(--accent);
+    color: #06121f;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  button:hover { opacity: 0.9; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  main {
+    max-width: 1280px;
+    margin: 0 auto;
+    padding: 20px 24px 60px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+  .stat-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+  }
+  .stat-tile {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+  }
+  .stat-tile.warn { border-color: rgba(224,71,90,0.4); }
+  .stat-tile .num { font-size: 24px; font-weight: 700; }
+  .stat-tile.warn .num { color: var(--critical); }
+  .stat-tile .label { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+  section {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  section > h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+    margin: 0;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+  .section-body { padding: 16px 18px; }
+  .empty { color: var(--text-faint); font-size: 13px; padding: 4px 0; }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+  .decision-monitor { background: rgba(91,122,153,0.18); color: var(--low); }
+  .decision-escalate { background: rgba(214,168,58,0.18); color: var(--medium); }
+  .decision-contain_pending_approval { background: rgba(224,71,90,0.18); color: var(--critical); }
+
+  .approval-card {
+    border: 1px solid rgba(224,71,90,0.35);
+    background: rgba(224,71,90,0.06);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    margin-bottom: 10px;
+  }
+  .approval-card:last-child { margin-bottom: 0; }
+  .approval-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+  .approval-incident { font-weight: 600; }
+  .approval-meta { font-size: 12px; color: var(--text-faint); }
+  .approval-preview { font-size: 12px; color: var(--text-dim); margin-bottom: 10px; }
+  .approval-actions { display: flex; gap: 8px; }
+  .act-btn {
+    font-size: 12px; font-weight: 600; border-radius: 6px; padding: 6px 14px; cursor: pointer; border: 1px solid var(--border);
+    background: #1c1f26; color: var(--text);
+  }
+  .act-btn.approve { border-color: rgba(103,194,58,0.5); color: #67c23a; }
+  .act-btn.reject { border-color: rgba(224,71,90,0.5); color: var(--critical); }
+  .act-btn:disabled { opacity: 0.5; cursor: default; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--text-dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.3px; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  .mono { font-family: ui-monospace, monospace; font-size: 12px; }
+  .dim { color: var(--text-faint); }
+
+  .activity-type {
+    font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px;
+    border-radius: 4px; padding: 1px 6px; border: 1px solid var(--border); color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .activity-type.decision { color: var(--accent); border-color: rgba(79,157,255,0.35); }
+  .activity-type.reanalysis { color: var(--medium); border-color: rgba(214,168,58,0.35); }
+  .activity-type.containment { color: var(--critical); border-color: rgba(224,71,90,0.35); }
+  .activity-type.override { color: #c77dff; border-color: rgba(199,125,255,0.35); }
+  .activity-type.playbook { color: var(--good); border-color: rgba(62,207,142,0.35); }
+
+  .filter-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .filter-chip {
+    font-size: 12px; font-weight: 600; border-radius: 999px; padding: 5px 12px; cursor: pointer;
+    border: 1px solid var(--border); background: transparent; color: var(--text-dim);
+  }
+  .filter-chip.active { background: var(--accent); color: #06121f; border-color: var(--accent); }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Admin Console <span id="status-line">loading…</span></h1>
+  </div>
+  <div class="header-actions">
+    <label class="auto-refresh-toggle">
+      <input type="checkbox" id="auto-refresh-checkbox" checked />
+      Auto-refresh (15s)
+    </label>
+    <button id="refresh-btn">Refresh Now</button>
+    <a class="nav-link" href="/">← Incident Dashboard</a>
+  </div>
+</header>
+
+<main>
+  <div class="stat-row" id="stat-row"></div>
+
+  <section>
+    <h2>Pending HITL Approvals</h2>
+    <div class="section-body" id="pending-approvals"></div>
+  </section>
+
+  <section>
+    <h2>System Activity Feed <span class="dim" style="text-transform:none;font-weight:400;">(decisions, feedback loops, playbook executions — merged, newest first)</span></h2>
+    <div class="section-body" id="activity-feed"></div>
+  </section>
+</main>
+
+<script>
+const $ = (sel) => document.querySelector(sel);
+const esc = (s) => (s ?? "").toString().replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtTime = (iso) => new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+let activityFilter = "all";
+let autoRefreshTimer = null;
+
+async function fetchJSON(url, opts) {
+  const res = await fetch(url, opts);
+  if (!res.ok) throw new Error(`${url} -> HTTP ${res.status}`);
+  return res.json();
+}
+
+function renderStats(approvalsPending, incidents, reanalysisRequests, containmentReviews, manualOverrides, executions) {
+  const tiles = [
+    { num: approvalsPending.length, label: "Pending Approvals", warn: approvalsPending.length > 0 },
+    { num: incidents.length, label: "Total Incidents" },
+    { num: incidents.filter(i => i.status === "contained").length, label: "Contained" },
+    { num: reanalysisRequests.length, label: "Re-Analysis Requests" },
+    { num: containmentReviews.length, label: "Containment Fallbacks" },
+    { num: manualOverrides.length, label: "Manual Overrides" },
+    { num: executions.length, label: "Playbooks Fired" },
+  ];
+  $("#stat-row").innerHTML = tiles.map(t => `
+    <div class="stat-tile ${t.warn ? "warn" : ""}"><div class="num">${t.num}</div><div class="label">${t.label}</div></div>
+  `).join("");
+}
+
+function renderPendingApprovals(approvals) {
+  const el = $("#pending-approvals");
+  if (!approvals.length) { el.innerHTML = `<div class="empty">No approvals awaiting a decision.</div>`; return; }
+
+  el.innerHTML = approvals.map(a => `
+    <div class="approval-card">
+      <div class="approval-head">
+        <span class="approval-incident">${esc(a.incident_title || a.incident_id)}</span>
+        <span class="approval-meta">requested ${fmtTime(a.requested_at)}</span>
+      </div>
+      <div class="approval-preview">Would execute: ${esc(a.requested_actions)}</div>
+      <div class="approval-actions" id="approval-actions-${a.id}">
+        <button class="act-btn approve" onclick="decideContainment('${a.id}', 'approve')">Approve</button>
+        <button class="act-btn reject" onclick="decideContainment('${a.id}', 'reject')">Reject</button>
+      </div>
+    </div>
+  `).join("");
+}
+
+function renderActivityFeed(commanderDecisions, reanalysisRequests, containmentReviews, manualOverrides, executions, playbooks, incidents) {
+  const el = $("#activity-feed");
+  const playbookById = Object.fromEntries(playbooks.map(p => [p.id, p]));
+  const incidentById = Object.fromEntries(incidents.map(i => [i.id, i]));
+  const incidentTitle = (id) => esc(incidentById[id]?.title ?? id);
+
+  const rows = [
+    ...commanderDecisions.map(d => ({
+      time: d.created_at,
+      type: "decision",
+      incidentId: d.incident_id,
+      detail: `<span class="badge decision-${d.decision}">${esc(d.decision.replace("_", " "))}</span> ${esc(d.summary)}`,
+    })),
+    ...reanalysisRequests.map(r => ({
+      time: r.created_at,
+      type: "reanalysis",
+      incidentId: r.incident_id,
+      detail: `${esc(r.reason)} — ${esc(r.prior_risk_rating)} (${r.prior_risk_score}) &rarr; ${esc(r.new_risk_rating)} (${r.new_risk_score})${r.requested_floor ? `, floor ${esc(r.requested_floor)}` : ""}`,
+    })),
+    ...containmentReviews.map(r => ({
+      time: r.created_at,
+      type: "containment",
+      incidentId: r.incident_id,
+      detail: `${esc(r.outcome.replace("_", " "))} — ${esc(r.prior_decision)} &rarr; ${esc(r.new_decision)}${r.note ? `: ${esc(r.note)}` : ""}`,
+    })),
+    ...manualOverrides.map(o => ({
+      time: o.created_at,
+      type: "override",
+      incidentId: o.incident_id,
+      detail: `${esc(o.approver)}: ${esc(o.reason)} &rarr; set to ${esc(o.decision)}${o.prior_decision ? ` (was ${esc(o.prior_decision)})` : ""}`,
+    })),
+    ...executions.map(e => ({
+      time: e.executed_at,
+      type: "playbook",
+      incidentId: e.incident_id,
+      detail: `${esc(playbookById[e.playbook_id]?.name ?? e.playbook_id)} fired — ${e.actions_taken.length} action(s)`,
+    })),
+  ].sort((a, b) => new Date(b.time) - new Date(a.time));
+
+  const filtered = activityFilter === "all" ? rows : rows.filter(r => r.type === activityFilter);
+
+  const counts = { all: rows.length };
+  for (const type of ["decision", "reanalysis", "containment", "override", "playbook"]) {
+    counts[type] = rows.filter(r => r.type === type).length;
+  }
+  const filterChip = (type, label) => `<button class="filter-chip ${activityFilter === type ? "active" : ""}" onclick="setActivityFilter('${type}')">${label} (${counts[type]})</button>`;
+
+  const filterRow = `
+    <div class="filter-row">
+      ${filterChip("all", "All")}
+      ${filterChip("decision", "Decisions")}
+      ${filterChip("reanalysis", "Re-Analysis")}
+      ${filterChip("containment", "Containment Fallbacks")}
+      ${filterChip("override", "Overrides")}
+      ${filterChip("playbook", "Playbooks")}
+    </div>
+  `;
+
+  if (!filtered.length) { el.innerHTML = filterRow + `<div class="empty">No activity recorded for this filter yet.</div>`; return; }
+
+  el.innerHTML = filterRow + `
+    <table>
+      <thead><tr><th>Time</th><th>Type</th><th>Incident</th><th>Detail</th></tr></thead>
+      <tbody>
+        ${filtered.map(r => `
+          <tr>
+            <td class="dim">${fmtTime(r.time)}</td>
+            <td><span class="activity-type ${r.type}">${r.type}</span></td>
+            <td>${incidentTitle(r.incidentId)}</td>
+            <td>${r.detail}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>
+  `;
+}
+
+function setActivityFilter(type) {
+  activityFilter = type;
+  loadAll();
+}
+
+async function decideContainment(approvalId, action) {
+  const approver = window.prompt("Your name/handle (recorded on the approval):", "");
+  if (!approver) return;
+  const note = window.prompt(`Optional note for this ${action}:`, "") || "";
+
+  const actionsEl = document.getElementById(`approval-actions-${approvalId}`);
+  if (actionsEl) actionsEl.querySelectorAll("button").forEach(b => b.disabled = true);
+
+  try {
+    await fetchJSON(`/containment-approvals/${approvalId}/${action}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approver, note }),
+    });
+    await loadAll();
+  } catch (err) {
+    alert(`Failed to ${action}: ${err.message}`);
+    if (actionsEl) actionsEl.querySelectorAll("button").forEach(b => b.disabled = false);
+  }
+}
+
+async function loadAll() {
+  $("#status-line").textContent = "loading…";
+  const [
+    pendingApprovals, incidents, playbooks, executions,
+    commanderDecisions, reanalysisRequests, containmentReviews, manualOverrides,
+  ] = await Promise.all([
+    fetchJSON("/containment-approvals?status=pending"),
+    fetchJSON("/incidents"),
+    fetchJSON("/playbooks"),
+    fetchJSON("/playbook-executions"),
+    fetchJSON("/commander-decisions"),
+    fetchJSON("/reanalysis-requests"),
+    fetchJSON("/containment-reviews"),
+    fetchJSON("/manual-overrides"),
+  ]);
+
+  renderStats(pendingApprovals, incidents, reanalysisRequests, containmentReviews, manualOverrides, executions);
+  renderPendingApprovals(pendingApprovals.map(a => ({
+    ...a,
+    incident_title: incidents.find(i => i.id === a.incident_id)?.title,
+  })));
+  renderActivityFeed(commanderDecisions, reanalysisRequests, containmentReviews, manualOverrides, executions, playbooks, incidents);
+
+  $("#status-line").textContent = `updated ${new Date().toLocaleTimeString()}`;
+}
+
+function scheduleAutoRefresh() {
+  if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+  if ($("#auto-refresh-checkbox").checked) {
+    autoRefreshTimer = setInterval(() => loadAll().catch(() => {}), 15000);
+  }
+}
+
+$("#refresh-btn").addEventListener("click", async () => {
+  const btn = $("#refresh-btn");
+  btn.disabled = true;
+  btn.textContent = "Refreshing…";
+  try {
+    await loadAll();
+  } catch (e) {
+    $("#status-line").textContent = `error: ${e.message}`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Refresh Now";
+  }
+});
+
+$("#auto-refresh-checkbox").addEventListener("change", scheduleAutoRefresh);
+
+loadAll().catch(e => { $("#status-line").textContent = `error: ${e.message}`; });
+scheduleAutoRefresh();
+</script>
+</body>
+</html>

@@ -23,6 +23,11 @@ def dashboard():
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/admin")
+def admin_console():
+    return FileResponse(STATIC_DIR / "admin.html")
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
